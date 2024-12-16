@@ -1,0 +1,716 @@
+
+# This script processes a chosen sample of article data to find the best hyperparameters used in the LDA. It cleans the text, removes common words and names, 
+# builds bigrams, and then searches for the optimal number of topics (K) along with the best alpha and beta values.
+# The grid search helps in finding the combination that gives the highest coherence score, ensuring the topics make sense.
+
+
+
+import logging
+import pandas as pd
+import os
+import json
+import re
+from gensim import corpora
+from gensim.models.phrases import Phrases, Phraser
+from gensim.models import LdaModel, CoherenceModel
+import spacy
+import numpy as np
+import random
+from collections import defaultdict
+from tqdm import tqdm  # For progress bar
+import time
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# ---------------------------
+# Configure Logging
+# ---------------------------
+logging.basicConfig(
+    format='%(asctime)s : %(levelname)s : %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("preprocessing.log", mode='a', encoding='utf-8')
+    ]
+)
+
+# ---------------------------
+# 1. Define Custom Stopword List
+# ---------------------------
+
+def get_custom_stopwords():
+    """
+    Returns a list of custom stopwords to be removed from the corpus.
+    """
+    custom_stopwords = [
+        "aderton", "adertonde", "adjö", "aldrig", "all", "alla", "allas", "allt",
+        "alltid", "alltså", "andra", "andras", "annan", "annat", "arton",
+        "artonde", "att", "av", "bakom", "bara", "behöva", "behövas", "behövde",
+        "behövt", "beslut", "beslutat", "beslutit", "bland", "blev", "bli",
+        "blir", "blivit", "borde", "bort", "borta", "bra", "bäst", "bättre",
+        "båda", "bådas", "både", "dag", "dagar", "dagarna", "dagbladet", "dagen", "de",
+        "del", "delen", "dem", "den", "denna", "deras", "dess", "dessa", "det",
+        "detta", "dig", "din", "databas", "databasen", "dina", "dit", "ditt", "dock", "dom", "du",
+        "där", "därför", "då", "efter", "eftersom", "ej", "elfte", "eller",
+        "elva", "en", "enkel", "expressen", "enkelt", "enklare", "enklast", "enkla", "enligt", "er", "era", "ert",
+        "ett", "ettusen", "fall", "fanns", "fast", "fem", "femte", "femtio",
+        "femtionde", "femton", "femtonde", "fick", "fin", "finnas", "finns",
+        "fjorton", "fjortonde", "fjärde", "fler", "flera", "flesta", "fram",
+        "framför", "från", "fyra", "fyrtio", "fyrtionde", "få", "får", "fått",
+        "följande", "för", "före", "förlåt", "förra", "första", "ge", "genast",
+        "genom", "ger", "gick", "gjorde", "gjort", "god", "goda", "godare",
+        "godast", "gott", "gälla", "gäller", "gällt", "gärna", "gå", "gång",
+        "går", "gått", "gör", "göra", "ha", "hade", "haft", "han", "hans", "har",
+        "hela", "heller", "hellre", "helst", "helt", "henne", "hennes", "heter",
+        "hit", "hjälp", "hon", "honom", "hundra", "hundraen", "hundraett", "hur",
+        "här", "hög", "höger", "högre", "högst", "i", "ibland", "icke", "idag",
+        "igen", "igår", "imorgon", "in", "inför", "inga", "ingen", "ingenting",
+        "inget", "innan", "inne", "inom", "inte", "inuti", "ja", "jag", "ju",
+        "jämfört", "kan", "kanske", "knappast", "kolla", "kl", "kom", "komma", "kommer",
+        "kommit", "kr", "kunde", "kunna", "kunnat", "kvar", "kör", "legat",
+        "ligga", "ligger", "lika", "likställd", "likställda", "lilla", "lite",
+        "liten", "litet", "lägga", "länge", "längre", "längst", "lätt", "lättare",
+        "lättast", "långsam", "långsammare", "långsammast", "långsamt", "långt",
+        "man", "med", "mellan", "men", "menar", "mer", "mera", "mest", "mig",
+        "min", "mina", "mindre", "minst", "mitt", "mittemot", "mot", "mycket",
+        "många", "måste", "möjlig", "möjligen", "möjligt", "möjligtvis", "ned",
+        "nederst", "nedersta", "ny", "nedre", "nej", "ner", "ni", "nio", "nionde",
+        "nittio", "nittionde", "nitton", "nittonde", "nog", "noll", "nr", "nu",
+        "nummer", "namn", "nya", "när", "nästa", "någon", "någonting", "något", "några",
+        "nån", "nåt", "nödvändig", "nödvändiga", "nödvändigt", "nödvändigtvis",
+        "och", "också", "ofta", "oftast", "olika", "olikt", "om", "oss", "procent",
+        "på", "rakt", "retrieva", "retriever", "redan", "rätt", "sade", "sagt", "samma", "samt", "sedan",
+        "sen", "senare", "senast", "sent", "ser", "se", "sex", "sextio", "sextionde",
+        "sexton", "sextonde", "sig", "sin", "sina", "sist", "sista", "siste",
+        "sitt", "sitta", "sju", "sjunde", "sjuttio", "sjuttionde", "sjutton",
+        "sjuttonde", "själv", "sjätte", "ska", "skall", "skriver", "skulle",
+        "slutligen", "små", "smått", "snart", "som", "stor", "stora", "stort",
+        "står", "stå", "större", "störst", "säga", "säger", "sämre", "sämst", "sätt",
+        "så", "sådan", "sådana", "sådant", "tt", "ta", "tack", "tar", "tidig",
+        "tidigare", "tidigast", "tidigt", "till", "tills", "tillsammans", "tio",
+        "tionde", "tjugo", "tjugoen", "tjugoett", "tjugonde", "tjugotre",
+        "tjugotvå", "tjungo", "tog", "tolfte", "tolv", "tre", "tredje", "trettio",
+        "trettionde", "tretton", "trettonde", "tro", "tror", "två", "tvåhundra",
+        "under", "upp", "ur", "ursäkt", "ut", "utan", "utanför", "ute", "utom",
+        "vad", "var", "vara", "varför", "varifrån", "varit", "varje", "varken",
+        "vars", "varsågod", "vart", "vem", "vems", "verkligen", "vet", "vi",
+        "vid", "vidare", "viktig", "viktigare", "viktigast", "viktigt", "vilka",
+        "vilkas", "vilken", "vilket", "vill", "visst", "väl", "vänster", "vänstra",
+        "värre", "vår", "våra", "vårt", "än", "ändå", "år", "ännu", "är", "även", "året",
+        "åt", "åtminstone", "åtta", "åttio", "åttionde", "åttonde", "över",
+        "övermorgon", "överst", "övre"
+    ]
+    logging.info(f"Custom stopword list loaded with {len(custom_stopwords)} words.")
+    return custom_stopwords
+
+# ---------------------------
+# 2. Fetch Common Names
+# ---------------------------
+
+def fetch_common_names():
+    """
+    Fetches common men's, women's, and last names from predefined URLs.
+
+    Returns:
+    - list: Combined list of common names.
+    """
+    logging.info("Fetching common names from online sources...")
+
+    common_names = []
+
+    # Fetch top 5 men's names
+    men_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/fornamn-man.csv"
+    try:
+        men_names_df = pd.read_csv(men_names_url, encoding='latin1')
+        men_names_df = men_names_df.sort_values(by='persons', ascending=False)
+        common_men_names = men_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_men_names])
+        logging.info(f"Fetched top 5 common men's names: {common_men_names}")
+    except Exception as e:
+        logging.error(f"Error fetching men's names from {men_names_url}: {e}")
+
+    # Fetch top 5 women's names
+    women_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/fornamn-kvinnor.csv"
+    try:
+        women_names_df = pd.read_csv(women_names_url, encoding='latin1')
+        women_names_df = women_names_df.sort_values(by='persons', ascending=False)
+        common_women_names = women_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_women_names])
+        logging.info(f"Fetched top 5 common women's names: {common_women_names}")
+    except Exception as e:
+        logging.error(f"Error fetching women's names from {women_names_url}: {e}")
+
+    # Fetch top 5 last names
+    last_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/efternamn.csv"
+    try:
+        last_names_df = pd.read_csv(last_names_url, encoding='latin1')
+        last_names_df = last_names_df.sort_values(by='persons', ascending=False)
+        common_last_names = last_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_last_names])
+        logging.info(f"Fetched top 5 common last names: {common_last_names}")
+    except Exception as e:
+        logging.error(f"Error fetching last names from {last_names_url}: {e}")
+
+    logging.info(f"Total common names fetched: {len(common_names)}")
+    return common_names
+
+# ---------------------------
+# 3. Load and Initialize SpaCy
+# ---------------------------
+
+def load_spacy_model():
+    """
+    Load the SpaCy Swedish model, downloading it if not present.
+
+    Returns:
+    - spacy.language.Language: The loaded SpaCy model.
+    """
+    model_name = 'sv_core_news_sm'
+    try:
+        # Only disable 'ner' to keep the parser active
+        nlp = spacy.load(model_name, disable=['ner'])
+        logging.info(f"SpaCy model '{model_name}' loaded successfully with 'ner' disabled.")
+        return nlp
+    except OSError:
+        logging.warning(f"SpaCy model '{model_name}' not found. Attempting to download...")
+        try:
+            spacy.cli.download(model_name)
+            nlp = spacy.load(model_name, disable=['ner'])
+            logging.info(f"SpaCy model '{model_name}' downloaded and loaded successfully.")
+            return nlp
+        except Exception as e:
+            logging.error(f"Failed to download and load SpaCy model '{model_name}': {e}")
+            raise
+    except Exception as e:
+        logging.error(f"Error loading SpaCy model: {e}")
+        raise
+
+# ---------------------------
+# 4. Load Data
+# ---------------------------
+
+def load_data(filepath):
+    logging.info(f"Loading data from {filepath}...")
+    encodings_to_try = ['utf-8', 'latin1', 'cp1252']  # List of encodings to try
+    for encoding in encodings_to_try:
+        try:
+            with open(filepath, 'r', encoding=encoding) as file:
+                data = json.load(file)
+            df = pd.DataFrame(data)
+            logging.info(f"Data loaded successfully with encoding '{encoding}' and {len(df)} records.")
+            return df
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logging.warning(f"Failed to read file with encoding '{encoding}': {e}")
+            continue  # Try the next encoding
+        except FileNotFoundError:
+            logging.error(f"The file {filepath} does not exist. Please check the file path and name.")
+            raise
+        except Exception as e:
+            logging.error(f"Error loading data from {filepath} with encoding '{encoding}': {e}")
+            raise
+    logging.error("Failed to load data with all tried encodings.")
+    raise ValueError("Cannot read the file with the specified encodings.")
+
+# ---------------------------
+# 5. Preprocessing (with Bigrams)
+# ---------------------------
+
+def preprocess_texts(texts):
+    logging.info("Starting text preprocessing...")
+    
+    # Define the unwanted lines patterns
+    unwanted_lines = [
+        r'Karén\. Databasens namn: Fredric Karén /  / retriever- info\.com',
+        r'Databasens namn: Lena K Samuelsson / Aftonbladet / retriever- info\.com',
+        r'Granström\. Databasens namn: Klas Granström /',
+        r'Databasens namn:',
+        r'Image-text',
+        r'PRESSBILD',
+        r'Expressen',
+        r'Aftonbladet',
+        r'Dagens Nyheter',
+        r'Svenska Dagbladet',
+        r'Dagens Industri'
+    ]
+    
+    # Combine all unwanted lines into a single regex pattern
+    unwanted_pattern = '|'.join(unwanted_lines)
+    
+    # Initialize a counter
+    removal_count = 0
+    
+    # Function to remove the unwanted lines and count removals
+    def remove_unwanted(text):
+        nonlocal removal_count
+        new_text, num_subs = re.subn(unwanted_pattern, '', text)
+        removal_count += num_subs
+        return new_text
+    
+    # Apply the removal function
+    texts = [remove_unwanted(text) for text in texts]
+    logging.info(f"Removed unwanted footnote lines {removal_count} times.")
+    
+    # Continue with other preprocessing steps
+    # Remove emails
+    texts = [re.sub(r'\S*@\S*\s?', '', text) for text in texts]
+    # Remove URLs
+    texts = [re.sub(r'http\S+|www\S+', '', text) for text in texts]
+    # Remove new line characters
+    texts = [re.sub(r'\s+', ' ', text) for text in texts]
+    # Remove single quotes
+    texts = [re.sub(r"\'", "", text) for text in texts]
+    # Remove non-alphabetic characters (excluding Swedish characters)
+    texts = [re.sub(r'[^a-zA-ZåäöÅÄÖ\s]', '', text) for text in texts]
+    # Convert to lowercase
+    texts = [text.strip().lower() for text in texts]
+    
+    logging.info("Text preprocessing completed.")
+    return texts
+
+
+def lemmatization(texts, nlp, allowed_postags=['NOUN', 'ADJ', 'VERB', 'ADV']):
+    logging.info("Starting lemmatization...")
+    texts_out = []
+    for doc in nlp.pipe(texts, batch_size=50, n_process=1):
+        lemmatized = []
+        for token in doc:
+            if token.pos_ in allowed_postags:
+                lemma = token.lemma_.lower()
+                lemmatized.append(lemma)
+        texts_out.append(lemmatized)
+    logging.info("Lemmatization completed.")
+    return texts_out
+
+def remove_stopwords(lemmatized_texts, stopwords_set):
+    logging.info("Removing stopwords and common names...")
+    processed_texts = [
+        [token for token in doc if token not in stopwords_set]
+        for doc in lemmatized_texts
+    ]
+    logging.info("Stopwords and common names removal completed.")
+    return processed_texts
+
+def check_stopword_removal(processed_texts, stopwords_set, sample_size=5):
+    """
+    Check that stopwords have been removed from the processed texts.
+
+    Parameters:
+    - processed_texts (list of list of str): Preprocessed and tokenized texts.
+    - stopwords_set (set of str): Set of stopwords that should have been removed.
+    - sample_size (int): Number of documents to sample for checking.
+    
+    Logs whether stopwords are present in sampled documents.
+    """
+    logging.info("Checking if stopwords have been removed from the processed texts...")
+    if len(processed_texts) == 0:
+        logging.warning("No documents to check for stopwords.")
+        return
+    actual_sample_size = min(sample_size, len(processed_texts))
+    sample_indices = random.sample(range(len(processed_texts)), actual_sample_size)
+    for idx in sample_indices:
+        doc = processed_texts[idx]
+        remaining_stopwords = set(doc).intersection(stopwords_set)
+        if remaining_stopwords:
+            logging.warning(f"Stopwords found in document {idx}: {remaining_stopwords}")
+        else:
+            logging.info(f"No stopwords found in document {idx}.")
+
+def count_remaining_stopwords(processed_texts, stopwords_set):
+    total_remaining = sum(len(set(doc).intersection(stopwords_set)) for doc in processed_texts)
+    logging.info(f"Total remaining stopwords across all documents: {total_remaining}")
+
+def build_bigram_model(processed_texts, min_count=5, threshold=100):
+    """
+    Build and return a bigram model and a phraser.
+
+    Parameters:
+    - processed_texts (list of list of str): Tokenized and preprocessed texts.
+    - min_count (int): Minimum count of word pairs to consider.
+    - threshold (int): Threshold for forming the phrases (higher means fewer phrases).
+
+    Returns:
+    - bigram_model (gensim.models.Phrases): The bigram model.
+    - bigram_phraser (gensim.models.phrases.Phraser): The phraser for transforming texts.
+    """
+    logging.info("Building bigram model...")
+    bigram_model = Phrases(processed_texts, min_count=min_count, threshold=threshold, delimiter='_')
+    bigram_phraser = Phraser(bigram_model)
+    logging.info("Bigram model built successfully.")
+    return bigram_model, bigram_phraser
+
+def apply_bigrams(bigram_phraser, texts):
+    """
+    Apply the bigram phraser to the tokenized texts.
+
+    Parameters:
+    - bigram_phraser (gensim.models.phrases.Phraser): The trained phraser.
+    - texts (list of list of str): Tokenized texts.
+
+    Returns:
+    - bigrammed_texts (list of list of str): Texts with bigrams applied.
+    """
+    logging.info("Applying bigram model to texts...")
+    bigrammed_texts = [bigram_phraser[text] for text in texts]
+    logging.info("Bigrams applied successfully.")
+    return bigrammed_texts
+
+def preprocess_pipeline(texts, stopwords, common_names, nlp, build_bigrams=True, min_count=5, threshold=100):
+    """
+    Complete preprocessing pipeline: cleaning, lemmatization, bigram detection, and stopword removal.
+
+    Parameters:
+    - texts (list of str): Raw text documents.
+    - stopwords (list of str): List of stopwords to remove.
+    - common_names (list of str): List of common names to remove.
+    - nlp: SpaCy language model.
+    - build_bigrams (bool): Whether to build and apply bigrams.
+    - min_count (int): Minimum count for bigram detection.
+    - threshold (int): Threshold for bigram detection.
+
+    Returns:
+    - processed_texts (list of list of str): Preprocessed and tokenized texts with bigrams.
+    - bigram_model (gensim.models.Phrases or None): The bigram model if built, else None.
+    - bigram_phraser (gensim.models.Phrases.Phraser or None): The phraser if built, else None.
+    """
+    # Step 1: Clean texts
+    cleaned_texts = preprocess_texts(texts)
+    # Check Swedish characters after cleaning
+    check_swedish_characters(cleaned_texts, "After preprocessing texts")
+
+    # Step 2: Lemmatize texts
+    lemmatized_texts = lemmatization(cleaned_texts, nlp)
+    # Check Swedish characters after lemmatization
+    check_swedish_characters(lemmatized_texts, "After lemmatization")
+
+    # Step 3: Build and apply bigrams
+    bigram_model, bigram_phraser = None, None
+    if build_bigrams:
+        bigram_model, bigram_phraser = build_bigram_model(lemmatized_texts, min_count=min_count, threshold=threshold)
+        lemmatized_texts = apply_bigrams(bigram_phraser, lemmatized_texts)
+        logging.info("Bigrams integrated into processed texts.")
+
+    # Step 4: Combine stopwords and common names
+    combined_stopwords = set([word.lower() for word in stopwords] + [name.lower() for name in common_names])
+
+    # Step 5: Remove stopwords and common names
+    processed_texts = remove_stopwords(lemmatized_texts, combined_stopwords)
+    # Check Swedish characters after stopword removal
+    check_swedish_characters(processed_texts, "After stopword removal")
+
+    # Step 6: Check stopword removal
+    check_stopword_removal(processed_texts, combined_stopwords, sample_size=5)
+
+    # Step 7: Count remaining stopwords
+    count_remaining_stopwords(processed_texts, combined_stopwords)
+
+    return processed_texts, bigram_model, bigram_phraser
+
+def check_swedish_characters(texts, step_description):
+    swedish_chars = ['å', 'ä', 'ö']
+    for idx, text in enumerate(texts[:5]):  # Check the first 5 texts
+        if isinstance(text, list):
+            joined_text = ' '.join(text)
+        else:
+            joined_text = text
+        chars_present = {char: char in joined_text for char in swedish_chars}
+        logging.info(f"{step_description} - Document {idx} Swedish characters presence: {chars_present}")
+
+# ---------------------------
+# 6. Building the Dictionary and Corpus
+# ---------------------------
+
+def build_dictionary_and_corpus(processed_texts, no_below=20, no_above=0.9):
+    logging.info("Building dictionary and corpus...")
+    # Create Dictionary
+    dictionary = corpora.Dictionary(processed_texts)
+    logging.info(f"Initial dictionary size: {len(dictionary)}")
+
+    # Filter out extremes to limit the number of features
+    dictionary.filter_extremes(no_below=no_below, no_above=no_above)
+    logging.info(f"Dictionary size after filtering: {len(dictionary)}")
+
+    # Filter processed_texts to only include words in the filtered dictionary
+    filtered_texts = [[word for word in text if word in dictionary.token2id] for text in processed_texts]
+    logging.info("Processed texts have been filtered to match the dictionary vocabulary.")
+
+    # Create Corpus: Term Document Frequency
+    corpus = [dictionary.doc2bow(text) for text in filtered_texts]
+    logging.info(f"Corpus size: {len(corpus)}")
+
+    return dictionary, corpus, filtered_texts
+
+# ---------------------------
+# 7. LDA Model Training and Evaluation
+# ---------------------------
+
+def train_lda_model(dictionary, corpus, texts, k=35, alpha=0.01, beta=0.001, passes=20, iterations=10, random_state=42):
+    """
+    Train an LDA model with specified parameters and evaluate its coherence.
+
+    Parameters:
+    - dictionary (gensim.corpora.Dictionary): The dictionary mapping.
+    - corpus (list of list of (int, int)): The corpus in bag-of-words format.
+    - texts (list of list of str): The preprocessed and tokenized texts.
+    - k (int): Number of topics.
+    - alpha (float or str): Hyperparameter for document-topic density.
+    - beta (float or str): Hyperparameter for topic-word density.
+    - passes (int): Number of passes through the corpus during training.
+    - iterations (int): Number of iterations per pass.
+    - random_state (int): Seed for reproducibility.
+
+    Returns:
+    - lda_model (gensim.models.LdaModel): The trained LDA model.
+    - coherence_score (float): The coherence score (c_v) of the model.
+    """
+    logging.info(f"Training LDA model with k={k}, alpha={alpha}, beta={beta}...")
+    lda_model = LdaModel(
+        corpus=corpus,
+        id2word=dictionary,
+        num_topics=k,
+        random_state=random_state,
+        passes=passes,
+        alpha=alpha,
+        eta=beta,
+        iterations=iterations,
+        per_word_topics=True,
+        update_every=0  # Update after each document
+    )
+    logging.info("LDA model training completed.")
+
+    # Compute Coherence Score (c_v)
+    coherence_model = CoherenceModel(
+        model=lda_model,
+        texts=texts,
+        dictionary=dictionary,
+        coherence='c_v'
+    )
+    coherence_score = coherence_model.get_coherence()
+    logging.info(f"LDA Model Coherence Score (c_v): {coherence_score}")
+
+    return lda_model, coherence_score
+
+# ---------------------------
+# 8. Grid Search Function for Alpha, Beta, and K
+# ---------------------------
+
+def grid_search_lda(dictionary, corpus, texts, alpha_values, beta_values, k_values, passes=20, iterations=10, random_state=42):
+    """
+    Perform grid search to find the optimal alpha, beta, and K values for LDA.
+
+    - dictionary (gensim.corpora.Dictionary): The dictionary mapping.
+    - corpus (list of list of (int, int)): The corpus in bag-of-words format.
+    - texts (list of list of str): The preprocessed and tokenized texts.
+    - alpha_values (list): List of alpha values to try.
+    - beta_values (list): List of beta (eta) values to try.
+    - k_values (list): List of K (number of topics) values to try.
+    - passes (int): Number of passes through the corpus during training.
+    - iterations (int): Number of iterations per pass.
+    - random_state (int): Seed for reproducibility.
+
+    Creates:
+
+    - best_params (dict): Dictionary with the best alpha, beta, and K.
+    - best_coherence (float): The best coherence score achieved.
+
+    """
+    best_coherence = -1
+    best_params = {}
+
+    total_runs = len(alpha_values) * len(beta_values) * len(k_values)
+    current_run = 1
+
+    param_combinations = [(k, alpha, beta) for k in k_values for alpha in alpha_values for beta in beta_values]
+
+    with tqdm(total=total_runs, desc="Grid Search Progress", unit="model") as pbar:
+        for k, alpha, beta in param_combinations:
+            start_time = time.time()
+            logging.info(f"Training LDA model {current_run}/{total_runs} with K={k}, alpha={alpha}, beta={beta}...")
+            try:
+                lda_model = LdaModel(
+                    corpus=corpus,
+                    id2word=dictionary,
+                    num_topics=k,
+                    random_state=random_state,
+                    passes=passes,
+                    alpha=alpha,
+                    eta=beta,
+                    iterations=iterations,
+                    per_word_topics=True,
+                    update_every=0  # Update after each document
+                )
+
+                # Compute coherence
+                coherence_model = CoherenceModel(
+                    model=lda_model,
+                    texts=texts,
+                    dictionary=dictionary,
+                    coherence='c_v'
+                )
+                coherence_score = coherence_model.get_coherence()
+
+                elapsed = time.time() - start_time
+                logging.info(f"Coherence Score: {coherence_score:.4f} | Time Taken: {elapsed:.2f} seconds")
+                print(f"Run {current_run}/{total_runs} | K: {k} | Alpha: {alpha} | Beta: {beta} | Coherence: {coherence_score:.4f} | Time: {elapsed:.2f}s")
+
+                # Update best parameters if current coherence is higher
+                if coherence_score > best_coherence:
+                    best_coherence = coherence_score
+                    best_params = {'K': k, 'alpha': alpha, 'beta': beta}
+
+            except Exception as e:
+                logging.error(f"Failed to train LDA with K={k}, alpha={alpha}, beta={beta}: {e}")
+                print(f"Run {current_run}/{total_runs} | K: {k} | Alpha: {alpha} | Beta: {beta} | Failed: {e}")
+
+            current_run += 1
+            pbar.update(1)
+
+    logging.info(f"Best Coherence Score: {best_coherence:.4f} with K={best_params.get('K')}, alpha={best_params.get('alpha')}, beta={best_params.get('beta')}")
+    print(f"\nBest Coherence Score: {best_coherence:.4f} with K={best_params.get('K')}, alpha={best_params.get('alpha')}, beta={best_params.get('beta')}\n")
+
+    return best_params, best_coherence
+
+# ---------------------------
+# 9. Main Execution Block for Grid Search
+# ---------------------------
+
+def main():
+    # ---------------------------
+    # Configuration
+    # ---------------------------
+    filepath = '/Users/Desktop/articles.json'  # <----- Need to be replace with correct file path
+
+    # Define the save directory 
+    SAVE_DIR = '/Users/Desktop/LDA_saved'
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    logging.info(f"Save directory set to: {SAVE_DIR}")
+
+    # Sample Run Configuration
+    USE_SAMPLE = True  # Set to 'False' to run on the entire dataset
+    SAMPLE_SIZE = 10000  # Number of documents to use in sample run
+
+    # LDA Parameters
+    # K will now be part of the grid search
+    PASSES = 20
+    ITERATIONS = 10
+    RANDOM_STATE = 42
+
+    # Bigrams Parameters
+    BUILD_BIGRAMS = True
+    BIGRAM_MIN_COUNT = 5
+    BIGRAM_THRESHOLD = 100
+
+    # Number of Top Words per Topic
+    TOP_N_WORDS = 10 
+
+    # ---------------------------
+    # Load Data
+    # ---------------------------
+    try:
+        df = load_data(filepath)
+    except Exception as e:
+        logging.error("Exiting due to data loading failure.")
+        return
+
+    # ---------------------------
+    # Fetch Custom Stopwords and Common Names
+    # ---------------------------
+    stopwords = get_custom_stopwords()
+    common_names = fetch_common_names()
+
+    # ---------------------------
+    # Load SpaCy Model
+    # ---------------------------
+    try:
+        nlp = load_spacy_model()
+    except Exception as e:
+        logging.error("Exiting due to SpaCy model loading failure.")
+        return
+
+    # ---------------------------
+    # Check for 'text' Column
+    # ---------------------------
+    if 'text' not in df.columns:
+        logging.error("The DataFrame does not contain a 'text' column.")
+        return
+
+    # ---------------------------
+    # Sample Documents for Evaluation
+    # ---------------------------
+    logging.info("Prep documents for LDA evaluation...")
+
+    if USE_SAMPLE:
+
+        sample_size = SAMPLE_SIZE
+        logging.info(f"Running in sample mode: Sampling {sample_size} documents.")
+        if len(df) >= sample_size:
+            sampled_df = df.sample(n=sample_size, random_state=RANDOM_STATE)
+        else:
+            sampled_df = df
+            logging.warning(f"The dataset contains fewer than {sample_size} documents. Using all available documents.")
+    else:
+        sample_size = len(df)
+        logging.info(f"Running on the entire dataset: {sample_size} documents.")
+        sampled_df = df
+
+    texts = sampled_df['text'].astype(str).tolist()
+
+    # ---------------------------
+    # Preprocess Sampled Texts
+    # ---------------------------
+    logging.info("Preprocessing sampled texts with bigrams...")
+
+    processed_texts, bigram_model, bigram_phraser = preprocess_pipeline(
+        texts, stopwords, common_names, nlp,
+        build_bigrams=BUILD_BIGRAMS,
+        min_count=BIGRAM_MIN_COUNT,
+        threshold=BIGRAM_THRESHOLD
+    )
+
+    # ---------------------------
+    # Build Dictionary and Corpus
+    # ---------------------------
+    logging.info("Building dictionary and corpus for processed texts...")
+
+    dictionary, corpus, filtered_texts = build_dictionary_and_corpus(processed_texts)
+
+    # ---------------------------
+    # Define Parameter Grid for Grid Search
+    # ---------------------------
+    alpha_values = ['symmetric', 'asymmetric', 0.01, 0.05, 0.1, 0.2, 0.5]
+    beta_values = [0.001, 0.01, 0.05, 0.1, 0.2, 'auto']
+    k_values = [10, 15, 20, 25, 30, 35, 40, 50] 
+
+    # ---------------------------
+    # Perform Grid Search
+    # ---------------------------
+    best_params, best_coherence = grid_search_lda(
+        dictionary=dictionary,
+        corpus=corpus,
+        texts=filtered_texts,
+        alpha_values=alpha_values,
+        beta_values=beta_values,
+        k_values=k_values,
+        passes=PASSES,
+        iterations=ITERATIONS,
+        random_state=RANDOM_STATE
+    )
+
+    # ---------------------------
+    # Print Best Parameters
+    # ---------------------------
+    print("\n--- Grid Search Completed ---")
+    print(f"Best K (Number of Topics): {best_params.get('K')}")
+    print(f"Best Alpha: {best_params.get('alpha')}")
+    print(f"Best Beta: {best_params.get('beta')}")
+    print(f"Best Coherence Score: {best_coherence:.4f}\n")
+
+    # ---------------------------
+    # Indicate Completion
+    # ---------------------------
+    logging.info("Grid search and final model training completed successfully.")
+    print("\n--- Grid Search and Final LDA Model Training Completed Successfully ---\n")
+
+if __name__ == '__main__':
+    main()
