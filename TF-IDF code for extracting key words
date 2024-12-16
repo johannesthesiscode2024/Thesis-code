@@ -1,0 +1,294 @@
+"""
+===============================================================================
+TF-IDF - Extracting key words 
+===============================================================================
+
+This script looks and analyzes reports of the two categories: Physical Risk Reports
+and Transition Risk Reports. It uses a method called Term Frequency-Inverse
+Document Frequency (TF-IDF) to find the 50 most important words from these reports.
+These words will act as keywords to help find related newspaper articles later on.
+
+The analysis only uses the important sections of the reports to make sure the results
+are accurate and relevant. These key sections are listed in Appendix A of the thesis.
+
+===============================================================================
+"""
+
+import os
+import re
+import nltk
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+from nltk.corpus import stopwords, wordnet
+from nltk.stem import WordNetLemmatizer
+from pdfminer.high_level import extract_text
+
+########################################################  PRE-PROCESSING WORD SEARCH ###########################################################
+
+# Download necessary NLTK data
+nltk.download(['punkt', 'averaged_perceptron_tagger', 'wordnet', 'stopwords'])
+
+# Initialize the lemmatizer
+lemmatizer = WordNetLemmatizer()
+
+# Function to map NLTK's part-of-speech tags to wordnet tags
+def nltk_tag_to_wordnet_tag(nltk_tag):
+    if nltk_tag.startswith('J'):
+        return wordnet.ADJ
+    elif nltk_tag.startswith('V'):
+        return wordnet.VERB
+    elif nltk_tag.startswith('N'):
+        return wordnet.NOUN
+    elif nltk_tag.startswith('R'):
+        return wordnet.ADV
+
+# Define English stopwords set
+STOPWORDS = set(stopwords.words('english'))
+
+# Custom stopwords to exclude specific climate-related terms
+custom_stopwords = STOPWORDS.union({"climate", "change", "increase", "climate change"})
+
+# Preprocess text: remove non-alphabetic characters, lowercase, lemmatize, remove stopwords
+def preprocess_text(text):
+    """
+    Cleans and prepares the text for analysis by:
+
+    - Adding spaces around punctuation
+    - Removing specific unwanted words
+    - Keeping only letters and spaces
+    - Converting to lowercase
+    - Breaking text into words
+    - Tagging parts of speech
+    - Lemmatizing words
+    - Removing stopwords and short words
+    """
+    # Add spaces around punctuation
+    text = re.sub(r'\s*([.,;!?])\s*', r' \1 ', text)
+    
+    # Remove unwanted words
+    exclude_terms = [
+        'figure', 'table', 'chapter', 'appendix', 'example', 'section',
+        'et al\.', 'et\. al\.', 'et\. al', 'et\.', 'fig\.', 'chap\.',
+        'wgiii', 'wgii', 'model', 'sweden', 'swedish', 'country',
+        'area', 'time', 'mean'
+    ]
+    for term in exclude_terms:
+        text = re.sub(r'\b{}\b'.format(term), '', text, flags=re.IGNORECASE)
+        
+    # Keep only letters and spaces, convert to lowercase
+    text = re.sub(r'[^a-zA-Z\s]', '', text.lower())
+    
+    # Break text into words
+    tokens = nltk.word_tokenize(text)
+    
+    # Tag parts of speech
+    nltk_tagged = nltk.pos_tag(tokens)
+    
+    # Map NLTK tags to WordNet tags
+    wordnet_tagged = map(lambda x: (x[0], nltk_tag_to_wordnet_tag(x[1])), nltk_tagged)
+    
+    # Lemmatize words
+    lemmatized_text = [
+        lemmatizer.lemmatize(word, tag) if tag else word 
+        for word, tag in wordnet_tagged
+    ]
+    
+    # Remove stopwords and short words
+    return ' '.join([
+        word for word in lemmatized_text 
+        if word not in STOPWORDS and len(word) > 3
+    ])
+
+# Define the display_word_clouds function 
+def display_word_clouds(model, feature_names, no_topics, no_top_words):
+    """
+    Creates and shows word clouds for each topic. Also prints the top words for each topic.
+    
+    Parameters:
+    - model: The trained LDA model.
+    - feature_names: List of words from the TF-IDF vectorizer.
+    - no_topics: Number of topics to display.
+    - no_top_words: Number of top words to show in the word cloud and print list.
+    """
+    # Get the path to the user's desktop
+    desktop_path = os.path.join(os.path.expanduser('~'), 'Desktop')
+    
+    for topic_idx, topic in enumerate(model.components_[:no_topics]):  
+        # Get top words and their weights
+        top_words = {feature_names[i]: topic[i] for i in topic.argsort()[:-no_top_words - 1:-1]}
+        
+        # Create word cloud
+        word_cloud = WordCloud(background_color='white').generate_from_frequencies(top_words)
+        plt.figure(figsize=(10, 10))
+        plt.imshow(word_cloud, interpolation='bilinear')
+        plt.axis('off')
+        plt.title(f"Topic {topic_idx + 1}", fontsize=16)
+        plt.show()
+        
+        # Save the word cloud to desktop
+        word_cloud_filename = os.path.join(desktop_path, f"topic_{topic_idx + 1}_wordcloud.png")
+        word_cloud.to_file(word_cloud_filename)
+        print(f"Word cloud for Topic {topic_idx + 1} saved as {word_cloud_filename}\n")
+        
+        # List of top words
+        top_word_list = [feature_names[i] for i in topic.argsort()[:-no_top_words - 1:-1]]
+        
+        # Print the top words
+        print(f"Topic {topic_idx + 1}:")
+        print(", ".join(top_word_list))
+        
+        # Also print the top words as a list
+        print(f"\nTop Words in Topic {topic_idx + 1} as List:")
+        print(top_word_list)
+        
+        # Save the top words list to desktop
+        top_words_filename = os.path.join(desktop_path, f"topic_{topic_idx + 1}_top_words.txt")
+        with open(top_words_filename, 'w') as f:
+            f.write(f"Topic {topic_idx + 1} Top Words:\n")
+            f.write(", ".join(top_word_list))
+        print(f"Top words for Topic {topic_idx + 1} saved as {top_words_filename}\n")
+
+########################################################  Physical Risk Reports ########################################################
+
+# paths for the Transition risk PDFs <---- If used this path need to be changed
+physical_folder_path = '/Users/Reports//Physical'
+
+physical_file_names = [
+    'S.ADCOM.pdf', 'AR4.1.pdf', 'AR6.11.pdf', 'AR6.1.pdf', 'AR6.2.pdf',
+    'SRCCL.1.pdf', 'AR6.3.pdf', 'AR6.13.pdf', 'AR6.16.pdf', 'SRCCL.2.pdf',
+    'McK.pdf', 'SR15.12.pdf', 'SRCCL.3.pdf', 'SRCCL.4.pdf', 'SREX.4.pdf',
+    'SRCCL.5.pdf', 'SREX.2.pdf', 'SROCC.Whole.pdf', 'SNC.812.pdf',
+    'STN.5.pdf', 'SENC.814.pdf', 'AG2.12.pdf', 'PartA.pdf', 'PartB.pdf',
+    'STNC.15.pdf', 'IMF.pdf', 'SREX.3.pdf'
+]
+    
+# Function to perform analysis for Physical Risk PDFs
+def perform_analysis_physical(folder_path, file_names):
+    """
+    Analyzes Physical Risk PDFs by finding the top 50 keywords using TF-IDF and LDA.
+    
+    Parameters:
+    - folder_path: Directory where Physical Risk PDFs are stored.
+    - file_names: List of Physical Risk PDF filenames.
+    """
+    print(f"\nAnalysis for Climate Physical Risk Seed Words:")
+    
+    # Preprocess documents
+    preprocessed_docs = []
+    for file_name in file_names:
+        try:
+            file_path = os.path.join(folder_path, file_name)
+            text = extract_text(file_path)
+            cleaned_text = preprocess_text(text)
+            preprocessed_docs.append(cleaned_text)
+            print(f"Processed {file_name}")
+        except Exception as e:
+            print(f"Error processing {file_name}: {e}")
+    
+    # Vectorize using TF-IDF
+    tfidf_vectorizer = TfidfVectorizer(
+        min_df=0.03, 
+        ngram_range=(1, 3), 
+        stop_words=custom_stopwords
+    ) # 1 means unigrams, 2 means bigrams/trigrams are included
+    doc_term_matrix_tfidf = tfidf_vectorizer.fit_transform(preprocessed_docs)
+    
+    # Fit LDA model
+    lda_model = LatentDirichletAllocation(
+        n_components=1, 
+        learning_method='online', 
+        learning_decay=0.8, 
+        learning_offset=10.0, 
+        max_iter=100, 
+        random_state=0
+    )
+    lda_model.fit(doc_term_matrix_tfidf)
+    perplexity_score = lda_model.perplexity(doc_term_matrix_tfidf)
+    
+    print(f"Model Perplexity: {perplexity_score}")
+    
+    # Display word clouds and top words
+    display_word_clouds(
+        lda_model, 
+        tfidf_vectorizer.get_feature_names_out(), 
+        1, 
+        50  # Number of top words set to 50
+    )
+    
+
+########################################################  Transition Risk Reports ########################################################
+
+# paths for the Transition risk PDFs <---- If used this path need to be changed
+transition_folder_path = '/Users/Reports/Transition'
+
+transition_file_names = [
+    'SR15.4.pdf', 'SR15.2.pdf', 'SNS.pdf', 'Ren.pdf', 'S23.pdf', 
+    'AR6.mit.pdf', 'AR6.18.pdf', 'AR6.17.pdf', 'AR6.pdf', 'CCS.pdf', 
+    'AR5.pdf', 'S8.7.pdf', 'S8.1-5.pdf', 'AR3.pdf', 'AR4.pdf'
+]
+            
+# Function to perform analysis for Transition Risk PDFs
+def perform_analysis_transition(folder_path, file_names):
+    """
+    Analyzes Transition Risk PDFs by finding the top 50 keywords using TF-IDF and LDA.
+    
+    Parameters:
+    - folder_path: Directory where Transition Risk PDFs are stored.
+    - file_names: List of Transition Risk PDF filenames.
+    """
+    print(f"\nAnalysis for Climate Transition Risk Seed Words:")
+    
+    # Preprocess documents
+    preprocessed_docs = []
+    for file_name in file_names:
+        try:
+            file_path = os.path.join(folder_path, file_name)
+            text = extract_text(file_path)
+            cleaned_text = preprocess_text(text)
+            preprocessed_docs.append(cleaned_text)
+            print(f"Processed {file_name}")
+        except Exception as e:
+            print(f"Error processing {file_name}: {e}")
+    
+    # Vectorize using TF-IDF
+    tfidf_vectorizer = TfidfVectorizer(
+        min_df=0.1, 
+        ngram_range=(1, 3), 
+        stop_words='english'
+    ) # 1 means unigrams, 2 means bigrams/trigrams are included
+    doc_term_matrix_tfidf = tfidf_vectorizer.fit_transform(preprocessed_docs)
+    
+    # Fit the LDA model
+    lda_model = LatentDirichletAllocation(
+        n_components=3, 
+        learning_method='online', 
+        learning_decay=0.8, 
+        learning_offset=10.0, 
+        max_iter=100, 
+        random_state=0
+    )
+    lda_model.fit(doc_term_matrix_tfidf)
+    perplexity_score = lda_model.perplexity(doc_term_matrix_tfidf)
+    
+    print(f"Model Perplexity: {perplexity_score}")
+    
+    # Display word clouds and top words
+    display_word_clouds(
+        lda_model, 
+        tfidf_vectorizer.get_feature_names_out(), 
+        3, 
+        50  # Number of top words set to 50
+    )
+    
+
+########################################################  Execute Analyses Simultaneously ########################################################
+
+if __name__ == "__main__":
+    # Perform analysis for Physical Risk PDFs
+    perform_analysis_physical(physical_folder_path, physical_file_names)
+    
+    # Perform analysis for Transition Risk PDFs
+    perform_analysis_transition(transition_folder_path, transition_file_names)
+
