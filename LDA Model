@@ -64,7 +64,7 @@
 #
 # ------------------------------------------------------------
 #
-# Purpose: This script identifies and quantifies topics related to climate change—both physical and transition risks—from collections of articles. 
+# Purpose: This script identifies and quantifies topics related to climate change, both physical and transition risks, from collections of articles. 
 # It calculates the document-topic distribution (θ) - (topic shares) - which will be used in asset pricing models to investigate whether these risks are factored into stock prices.
 #
 # ======================================================================
