@@ -1,0 +1,718 @@
+# ---------------------------
+# Description of Script
+# ---------------------------
+#
+# Purpose:
+# This script estimates stocks' beta by analyzing their sensitivity to climate risk 
+# factors within different Fama-French models (FF3, FF4, FF5). 
+#
+# Key Steps:
+#
+# 1. Defining Date Range: The fixed date range for the analysis
+# 2. Load Market Data: Import daily market returns and risk-free rates
+# 3. Load Stock Data: Import and prepare stock-specific data, calculating daily returns
+# 4. Load Climate Factors: Import daily climate topic shares for transition and physical risks
+# 5. Load Fama-French Factors: Import daily Fama-French factors for models FF3, FF4, and FF5
+# 6. Merge Data: Combine all datasets into a single df for analysis
+# 7. Estimate Betas: Perform Ordinary Least Squares (OLS) regressions to estimate beta coefficients
+# 8. Execute Process: Run the beta estimation 
+
+
+
+# ---------------------------
+# Data Requirements
+# ---------------------------
+# Before running this script, ensure having the following JSON data files:
+#
+# 1. - daily market returns and risk-free rates.
+#    - Required Columns: 'date', 'Market Daily Return Daily', 'Risk-Free Daily'
+#
+# 2. - stock data with BID PRICE, Market Equity, Book-to-Market, and Market Status.
+#    - Required Structure: Keys as tuples (stock_ticker, date_str), values as dictionaries with the mentioned fields.
+#
+# 3. - daily topic shares of to climate risks.
+#    - Required Columns: 'date', 'Topic_#' for each topic.
+#
+# 4. Fama-French Factor Files:
+#    - FF3_factors_daily.json, FF4_factors_daily.json, FF5_factors_daily.json
+#    - daily Fama-French factors like SMB, HML, UMD, RMW, CMA.
+#    - Required Columns: 'date' and respective factor columns based on the model.
+
+
+# ---------------------------
+# Import necessary libraries
+# ---------------------------
+
+import json
+import pandas as pd
+import numpy as np
+from datetime import datetime, timezone
+from tqdm import tqdm  # For progress bar
+import statsmodels.api as sm
+import os
+import logging
+from pandas.errors import OutOfBoundsDatetime
+import ast  # For safe evaluation of strings
+import warnings
+warnings.filterwarnings('ignore')  # To suppress any warnings during execution
+
+# ---------------------------
+# Control Variable
+# ---------------------------
+
+run_beta_estimation = True  # 'False' to skip 
+
+
+# ---------------------------
+# 1. Define Fixed Date Range
+# ---------------------------
+fixed_start_date = '2000-01-03' # First trading day of the year
+fixed_end_date = '2023-12-29'   # Last trading day of the year
+fixed_dates = pd.bdate_range(start=fixed_start_date, end=fixed_end_date)
+
+
+# ---------------------------
+# 2. Load Market Returns and Risk-Free Rates (Daily) with Fixed Dates
+# ---------------------------
+
+def load_market_riskfree_daily(path, fixed_dates):
+
+    """
+    Loads daily market returns and risk-free rates from a JSON file,
+    reindexes to fixed_dates, and fills missing values.
+    """
+
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        
+        # Convert JSON to DataFrame
+        df = pd.DataFrame.from_dict(data, orient='index').reset_index()
+        
+        # Rename columns for clarity
+        df = df.rename(columns={
+            'index': 'original_index',  
+            'Market Daily Return': 'Market Daily Return (%)',
+            'Risk-Free Daily': 'Risk-Free Daily (%)'
+        })
+        
+        # Convert 'date' to datetime and normalize to remove any time component
+        df['date'] = pd.to_datetime(df['date']).dt.normalize()
+        
+        # Convert percentage values to decimal
+        df['Market Daily Return'] = df['Market Daily Return (%)'].astype(float) / 100
+        df['Risk-Free Daily'] = df['Risk-Free Daily (%)'].astype(float)
+        
+        # Drop the original percentage columns
+        df.drop(columns=['Market Daily Return (%)', 'Risk-Free Daily (%)'], inplace=True)
+        
+        # Set 'date' as index
+        df.set_index('date', inplace=True)
+        
+        # Reindex to fixed_dates
+        df = df.reindex(fixed_dates)
+        
+        # Fill missing 'Market Daily Return' with 0.0
+        df['Market Daily Return'] = df['Market Daily Return'].fillna(0.0)
+        
+        # Forward fill 'Risk-Free Daily'
+        df['Risk-Free Daily'] = df['Risk-Free Daily'].ffill()
+        
+        # Reset index to bring 'date' back as a column
+        df.reset_index(inplace=True)
+        
+        # Drop 'original_index' if it exists
+        if 'original_index' in df.columns:
+            df.drop(columns=['original_index'], inplace=True)
+        
+        return df
+    except Exception as e:
+        print(f"Error loading market risk-free data: {e}")
+        return pd.DataFrame()
+
+# Load market returns and risk-free rates (daily) with fixed dates
+market_riskfree_daily_path = '/Users/Desktop/DAILY_MARKET_RISKFREE.json' # <------ Need to be changed with correct market data (Market returns and Riskfree rate)
+market_riskfree_daily = load_market_riskfree_daily(market_riskfree_daily_path, fixed_dates)
+
+# Verify if market_riskfree_daily is loaded correctly
+if market_riskfree_daily.empty:
+    raise ValueError("market_riskfree_daily DataFrame is empty. Please check the data source.")
+
+# Use the fixed date range as valid dates
+valid_dates = fixed_dates
+
+# ---------------------------
+# Test 1: Verify Market Data Load
+# ---------------------------
+print("Market data loaded with shape:", market_riskfree_daily.shape)
+print("Date range in market data:", market_riskfree_daily['date'].min(), market_riskfree_daily['date'].max())
+print("Missing data in market data columns:", market_riskfree_daily.isnull().sum())
+
+
+
+# ---------------------------
+# 3. Load and Prepare Stock Data with Fixed Dates
+# ---------------------------
+
+def load_and_prepare_stock_data(path, fixed_dates):
+    """
+    Loads stock data from a JSON file, aligns with fixed_dates,
+    and calculates daily returns with special handling for BID_PRICE.
+    """
+    with open(path, 'r') as f:
+        data = json.load(f)
+    
+    # Convert JSON data to DataFrame
+    records = []
+    for key, value in data.items():
+        try:
+            # Use ast.literal_eval for safe evaluation
+            stock_ticker, date_str = ast.literal_eval(key)
+            date = pd.to_datetime(date_str)
+            
+            # Only include dates within the fixed range
+            if fixed_start_date <= date.strftime('%Y-%m-%d') <= fixed_end_date:
+                record = {
+                    'stock_ticker': stock_ticker,
+                    'date': date,
+                    'BID_PRICE': value.get('BID PRICE'),
+                    'Market Equity': value.get('Market Equity'),  # Market Capitalization
+                    'Book-to-Market': value.get('Book-to-Market'),
+                    'Market Status': value.get('Market Status')  # Keep Market Status for BID_PRICE handling
+                }
+                records.append(record)
+        except Exception as e:
+            print(f"Error parsing key {key}: {e}")
+    
+    df = pd.DataFrame(records)
+    
+    # Remove entries with less than zero Market Equity to avoid division errors
+    df = df[df['Market Equity'] > 0]
+    
+    # Sort DataFrame by stock_ticker and date
+    df.sort_values(by=['stock_ticker', 'date'], inplace=True)
+    
+    # Create a complete date range for each stock
+    all_stocks = df['stock_ticker'].unique()
+    complete_records = []
+    
+    for stock in all_stocks:
+        stock_df = df[df['stock_ticker'] == stock].set_index('date').reindex(fixed_dates)
+        stock_df['stock_ticker'] = stock
+        stock_df['Market Status'] = stock_df['Market Status'].fillna(method='ffill')
+        # No need to fill 'BID_PRICE' and other fields here; handled below
+        stock_df.reset_index(inplace=True)
+        stock_df = stock_df.rename(columns={'index': 'original_index'})  # Temporary rename
+        complete_records.append(stock_df)
+    
+    df_complete = pd.concat(complete_records, ignore_index=True)
+    
+    # Handle 'BID_PRICE' based on 'Market Status'
+    active_mask = df_complete['Market Status'] == 'Active'
+    
+    # Forward fill 'BID_PRICE' only for active companies
+    df_complete.loc[active_mask, 'BID_PRICE'] = df_complete.loc[active_mask, 'BID_PRICE'].fillna(method='ffill')
+    
+    # For inactive companies, 'BID_PRICE' is left as NaN (do not set to 0.0)
+    
+    # Forward fill 'Market Equity' and 'Book-to-Market'
+    df_complete['Market Equity'] = df_complete['Market Equity'].fillna(method='ffill').fillna(0.0)
+    df_complete['Book-to-Market'] = df_complete['Book-to-Market'].fillna(method='ffill').fillna(0.0)
+    
+    # Calculate daily returns
+    df_complete['previous_bid_price'] = df_complete.groupby('stock_ticker')['BID_PRICE'].shift(1)
+    df_complete['daily_return'] = (df_complete['BID_PRICE'] / df_complete['previous_bid_price']) - 1
+    df_complete['daily_return'] = df_complete['daily_return'].fillna(0.0)  # First day return set to 0.0
+    
+    # Drop 'original_index' if it exists
+    if 'original_index' in df_complete.columns:
+        df_complete.drop(columns=['original_index'], inplace=True)
+    
+    return df_complete
+
+# Use the function to load and prepare data
+stock_data_path = '/Users/Desktop/market/market_data.json # <-----  Need to load correct file path: BID PRICE, Market Equity, Book-to-Market, Market Status (Active, Non-Active)
+df = load_and_prepare_stock_data(stock_data_path, fixed_dates)
+
+# Checking df
+print("Stock df Head:")
+print(df.head())
+print("Stock df Tail:")
+print(df.tail())
+
+# ---------------------------
+# Test 2: Verify Stock Data Load and Handle Missing Dates
+# ---------------------------
+print("Stock data loaded with shape:", df.shape)
+print("Date range in stock data:", df['date'].min(), df['date'].max())
+print("Missing data in stock data columns:", df.isnull().sum())
+
+
+
+# ---------------------------
+# 4. Load Climate Factors (Transition and Physical) - Daily Topics with Fixed Dates
+# ---------------------------
+
+def load_topic_shares_daily(path, fixed_dates):
+    """
+    Loads daily topic shares from a JSON file, reindexes to fixed_dates,
+    and fills missing values with 0.0.
+    """
+    with open(path, 'r') as f:
+        data = json.load(f)
+    df = pd.DataFrame(data)
+    
+    # Attempt to convert 'date' column to correct. For me I had it in ms from date, and for better interpretation I wanted to convert it to date.
+    try:
+        # Try converting milliseconds to date
+        df['date'] = pd.to_datetime(df['date'], unit='ms')
+    except (OverflowError, OutOfBoundsDatetime, ValueError):
+        try:
+            # If that fails, try second
+            df['date'] = pd.to_datetime(df['date'], unit='s')
+        except (OverflowError, OutOfBoundsDatetime, ValueError):
+
+            df['date'] = pd.to_datetime(df['date'])
+    
+    # Set 'date' as index
+    df.set_index('date', inplace=True)
+    
+    # Reindex to fixed_dates, fill missing with 0.0
+    df = df.reindex(fixed_dates, fill_value=0.0)
+    
+    # Reset index to bring 'date' back as a column
+    df.reset_index(inplace=True)
+    
+    # Drop 'index' if it exists
+    if 'index' in df.columns:
+        df.drop(columns=['index'], inplace=True)
+    
+    return df
+
+# Paths to daily topic shares
+transition_topic_shares_path = '/Users/Desktop/TEXT/Output/t/daily_topic_shares.json' # <----- Need to be changed to correct file path with the estimated topic shares for transition risk
+physical_topic_shares_path = '/Users/Desktop/TEXT/Output/p/daily_topic_shares.json'   # <----- Need to be changed to correct file path with the estimated topic shares for physical risk 
+
+# Load daily transition and physical climate risk factors with fixed dates
+transition_topics = load_topic_shares_daily(transition_topic_shares_path, fixed_dates)
+physical_topics = load_topic_shares_daily(physical_topic_shares_path, fixed_dates)
+
+# Function to rename Topic columns with a specified suffix
+def rename_topic_columns(df, suffix):
+
+    """
+    - df (pd.DataFrame): df containing topic columns.
+    - suffix: Suffix to append to topic column names.
+
+    Returns:
+    - pd.DataFrame: DataFrame with renamed topic columns.
+    """
+    return df.rename(columns={col: f"{col}_{suffix}" for col in df.columns if col.startswith('Topic_')})
+
+# Rename columns in transition_topics and physical_topics
+transition_topics = rename_topic_columns(transition_topics, 'transition')
+physical_topics = rename_topic_columns(physical_topics, 'physical')
+
+# ---------------------------
+# Test 3: Verify Climate Factors Load and Date Filter
+# ---------------------------
+print("Climate data loaded with shape:", transition_topics.shape, physical_topics.shape)
+print("Missing data in climate factors:", transition_topics.isnull().sum(), physical_topics.isnull().sum())
+
+
+
+# ---------------------------
+# 5. Load Fama-French Factors (FF3, FF4, FF5) in Daily Frequency with Fixed Dates
+# ---------------------------
+
+def load_ff_factors_daily(path, model, fixed_dates):
+    """
+    Loads Fama-French factors from a JSON file, renames columns based on the model,
+    reindexes to fixed_dates, and fills missing values.
+    """
+    with open(path, 'r') as f:
+        data = json.load(f)
+    df = pd.DataFrame(data)
+    
+    # Convert 'date' to datetime
+    df['date'] = pd.to_datetime(df['date']).dt.normalize()
+    
+    # Set 'date' as index
+    df.set_index('date', inplace=True)
+    
+    # Reindex to fixed_dates, forward fill
+    df = df.reindex(fixed_dates).ffill()
+    
+    # Rename columns based on model
+    if model == 'FF3':
+        df = df.rename(columns={'SMB': 'FF3_SMB', 'HML': 'FF3_HML'})
+    elif model == 'FF4':
+        df = df.rename(columns={'SMB': 'FF4_SMB', 'HML': 'FF4_HML', 'UMD': 'FF4_UMD'})
+    elif model == 'FF5':
+        df = df.rename(columns={'SMB': 'FF5_SMB', 'HML': 'FF5_HML', 'RMW': 'FF5_RMW', 'CMA': 'FF5_CMA'})
+    
+    # Reset index to bring 'date' back as a column
+    df.reset_index(inplace=True)
+    
+    # Drop 'index' if it exists
+    if 'index' in df.columns:
+        df.drop(columns=['index'], inplace=True)
+    
+    return df
+
+# Load FF3, FF4, FF5 factors with fixed dates
+ff3_daily_path = '/Users/Desktop/FF3/FF3_factors_daily.json'    # <---- Need to be changed to the correct file path for Fama French Factors, daily
+ff4_daily_path = '/Users/Desktop/FF4/FF4_factors_daily.json'    # -----"-----
+ff5_daily_path = '/Users/Desktop/FF5/FF5_factors_daily.json'    # -----"-----
+
+ff3_daily = load_ff_factors_daily(ff3_daily_path, 'FF3', fixed_dates)
+ff4_daily = load_ff_factors_daily(ff4_daily_path, 'FF4', fixed_dates)
+ff5_daily = load_ff_factors_daily(ff5_daily_path, 'FF5', fixed_dates)
+
+# Merge all Fama-French factors based on date
+ff_daily = ff3_daily.merge(ff4_daily, on='date', how='outer').merge(ff5_daily, on='date', how='outer')
+
+factor_columns_ff = ['FF3_SMB', 'FF3_HML', 'FF4_SMB', 'FF4_HML', 'FF4_UMD',
+                    'FF5_SMB', 'FF5_HML', 'FF5_RMW', 'FF5_CMA']
+ff_daily[factor_columns_ff] = ff_daily[factor_columns_ff].ffill()
+
+print("FF factors loaded with shape:", ff_daily.shape)
+print("Missing data in FF factors:", ff_daily.isnull().sum())
+
+# ---------------------------
+# 6. Merge Market Returns and Risk-Free Rates into ff_daily to Compute 'Mkt-RF'
+# ---------------------------
+
+# Merge Market Returns and Risk-Free Rates into ff_daily based on 'date'
+ff_daily = pd.merge(
+    ff_daily,
+    market_riskfree_daily[['date', 'Market Daily Return', 'Risk-Free Daily']],
+    on='date',
+    how='left'
+)
+
+# Fill any remaining missing 'Market Daily Return' with 0.0
+ff_daily['Market Daily Return'] = ff_daily['Market Daily Return'].fillna(0.0)
+
+# Forward fill 'Risk-Free Daily' if any missing values remain
+ff_daily['Risk-Free Daily'] = ff_daily['Risk-Free Daily'].ffill()
+
+# Compute 'Mkt-RF' as 'Market Daily Return' minus 'Risk-Free Daily'
+ff_daily['Mkt-RF'] = ff_daily['Market Daily Return'] - ff_daily['Risk-Free Daily']
+
+# Verify that 'Mkt-RF' has been created
+if 'Mkt-RF' not in ff_daily.columns:
+    raise ValueError("'Mkt-RF' column was not successfully created in ff_daily.")
+
+print("After merging market data, shape of ff_daily:", ff_daily.shape)
+print("Missing 'Mkt-RF' values after merge:", ff_daily['Mkt-RF'].isnull().sum())
+
+
+
+
+
+
+# ---------------------------
+# 7. Merge All Data into combined_df
+# ---------------------------
+
+# Merge stock data with ff_daily
+combined_df = pd.merge(df, ff_daily, on='date', how='left')
+
+# Merge climate factors
+combined_df = pd.merge(combined_df, transition_topics, on='date', how='left')
+combined_df = pd.merge(combined_df, physical_topics, on='date', how='left')
+
+factor_columns_ff = ['Mkt-RF', 'FF3_SMB', 'FF3_HML', 'FF4_SMB', 'FF4_HML', 
+                    'FF4_UMD', 'FF5_SMB', 'FF5_HML', 'FF5_RMW', 'FF5_CMA']
+combined_df[factor_columns_ff] = combined_df[factor_columns_ff].ffill()
+
+# Forward fill 'Risk-Free Daily' if any missing values remain
+combined_df['Risk-Free Daily'] = combined_df['Risk-Free Daily'].fillna(method='ffill')
+
+# Verify the combined DataFrame
+print("Combined data shape:", combined_df.shape)
+print("Missing values in combined data after merge:", combined_df.isnull().sum())
+
+if combined_df.columns.duplicated().any():
+    raise ValueError("There are duplicate columns in combined_df. Please check the merging steps.")
+
+# ---------------------------
+# 8. Define Climate Risk Factors and Control Factors for Each Model
+# ---------------------------
+
+# Specify the Topic IDs for physical and transition climate risks
+physical_topic_ids = [16]  # Physical topics: Topics 16
+transition_topic_ids = [12, 13, 3]  # Transition topics: Topics 12, 13, 3
+
+# Create column names for the specified physical and transition topics
+physical_topic_cols = [f'Topic_{i}_physical' for i in physical_topic_ids]
+transition_topic_cols = [f'Topic_{i}_transition' for i in transition_topic_ids]
+
+# Combine all climate topics into a single list
+climate_topics = physical_topic_cols + transition_topic_cols
+
+# Verify that all required topic columns are present in the DataFrame
+missing_physical = [col for col in physical_topic_cols if col not in combined_df.columns]
+missing_transition = [col for col in transition_topic_cols if col not in combined_df.columns]
+
+if missing_physical:
+    print(f"\nMissing Physical Topic Columns: {missing_physical}")
+if missing_transition:
+    print(f"\nMissing Transition Topic Columns: {missing_transition}")
+
+if not missing_physical and not missing_transition:
+    # All required topics are present; proceed to estimation
+    print("\nAll required topic columns are present.")
+
+print("Columns in combined data:", combined_df.columns)
+
+
+# ---------------------------
+# 9. Continue with Remaining Steps
+# ---------------------------
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Ensure 'date' is datetime and sorted
+combined_df['date'] = pd.to_datetime(combined_df['date'])
+combined_df = combined_df.sort_values(['stock_ticker', 'date']).reset_index(drop=True)
+
+# Recalculate 'Mkt-RF' to ensure accuracy
+combined_df['Mkt-RF'] = combined_df['Market Daily Return'] - combined_df['Risk-Free Daily']
+
+# Calculate Excess Return
+combined_df['Excess_Return'] = combined_df['daily_return'] - combined_df['Risk-Free Daily']
+
+logging.info("Ready for regression. Data check:")
+logging.info(combined_df[['Mkt-RF', 'Excess_Return']].isnull().sum())
+
+# Define Fama-French models
+factor_models = {
+    'FF3': ['Mkt-RF', 'FF3_SMB', 'FF3_HML'],
+    'FF4': ['Mkt-RF', 'FF4_SMB', 'FF4_HML', 'FF4_UMD'],
+    'FF5': ['Mkt-RF', 'FF5_SMB', 'FF5_HML', 'FF5_RMW', 'FF5_CMA']
+}
+
+# Define ff_models as a list of model keys
+ff_models = ['FF3', 'FF4', 'FF5']
+
+# Verify that all factor_columns are present in combined_df
+missing_factors = []
+for model, factors in factor_models.items():
+    for factor in factors:
+        if factor not in combined_df.columns:
+            missing_factors.append(factor)
+
+if missing_factors:
+    logging.warning(f"Missing factor columns in combined_df: {missing_factors}")
+else:
+    logging.info("All required factor columns are present in combined_df.")
+
+logging.info(f"Defined factor models with control factors: {factor_models}")
+
+# Additional Verification: Check BID_PRICE missing by Market Status
+missing_bid_price_active = combined_df.loc[
+    (combined_df['Market Status'] == 'Active') & (combined_df['BID_PRICE'].isnull()), 'BID_PRICE'
+].count()
+missing_bid_price_inactive = combined_df.loc[
+    (combined_df['Market Status'] != 'Active') & (combined_df['BID_PRICE'].isnull()), 'BID_PRICE'
+].count()
+
+logging.info(f"Missing BID_PRICE for Active companies: {missing_bid_price_active}")
+logging.info(f"Missing BID_PRICE for Inactive companies: {missing_bid_price_inactive}")
+
+
+
+# ---------------------------
+# 10. Estimate Betas Using the Topics Directly
+# ---------------------------
+
+def estimate_climate_beta(y, climate_factor, control_factors):
+    """
+    Runs OLS regression and returns the beta coefficient for the climate factor.
+
+    - y: Dependent variable (Series) - Excess Returns
+    - climate_factor: Series - Climate Factor (Topic)
+    - control_factors: DataFrame - Fama-French Factors (X_t)
+
+    Returns:
+    - beta: float - Estimated climate beta
+    """
+    # Combine control factors and climate factor into predictors
+    X = control_factors.copy()
+    X['Climate_Factor'] = climate_factor
+    X = sm.add_constant(X)  # Adds a constant term to the predictors
+
+    # Fit OLS regression
+    model = sm.OLS(y, X).fit()
+
+    # Extract beta coefficient for the climate factor
+    beta = model.params['Climate_Factor']
+
+    return beta
+
+
+def estimate_betas_for_stock_and_topic(stock_ticker, climate_topic, ff_model, combined_df):
+    """
+    Estimates beta for a given stock and climate topic using the specified Fama-French model.
+
+    - stock_ticker (str): The stock ticker symbol.
+    - climate_topic (str): The climate topic column name.
+    - ff_model (str): The Fama-French model to use ('FF3', 'FF4', 'FF5').
+    - combined_df (pd.DataFrame): The combined dataset.
+
+    Returns:
+    - list of dicts: Each dict contains 'stock_ticker', 'date', and 'beta_climate'.
+    """
+    # Use the factor_models dictionary defined earlier
+    factors = factor_models.get(ff_model)
+    if not factors:
+        logging.error("Invalid Fama-French model specified. Choose 'FF3', 'FF4', or 'FF5'.")
+        raise ValueError("Invalid Fama-French model specified. Choose 'FF3', 'FF4', or 'FF5'.")
+
+    # Extract data for the specified stock
+    stock_data = combined_df[combined_df['stock_ticker'] == stock_ticker].copy()
+    stock_data = stock_data.sort_values('date').reset_index(drop=True)
+
+    # Ensure 'date' is a datetime object
+    stock_data['date'] = pd.to_datetime(stock_data['date'])
+
+    # Get unique month-end dates
+    month_ends = stock_data['date'].groupby(stock_data['date'].dt.to_period('M')).max()
+
+    beta_estimates = []
+
+    for end_date in month_ends:
+        # Convert end_date to Pandas Timestamp
+        end_date = pd.Timestamp(end_date)
+        beta_date = end_date.strftime('%Y-%m-%d')
+
+        # Define the start date for the 3-month rolling window
+        start_date = end_date - pd.DateOffset(months=3) + pd.DateOffset(days=1)
+        window = stock_data[(stock_data['date'] >= start_date) & (stock_data['date'] <= end_date)]
+
+        # Check if the window has enough data points (e.g., at least 40 days)
+        if len(window) < 40:
+            logging.info(f"Skipping estimation for {stock_ticker} on {beta_date}: not enough data points.")
+            continue  # Skip if not enough data
+
+        # Dependent variable: Excess Return
+        y = window['Excess_Return']
+
+        # Independent variables: Control factors (Fama-French factors)
+        X_controls = window[factors]
+
+        # Log the factors being used for transparency
+        logging.info(f"Estimating betas for {stock_ticker} using factors on {beta_date}: {factors}")
+
+        # Climate factor: The specified topic
+        climate_factor_series = window[climate_topic]
+
+        # Check for missing values
+        mask = y.notnull() & X_controls.notnull().all(axis=1) & climate_factor_series.notnull()
+        y_clean = y[mask]
+        X_controls_clean = X_controls[mask]
+        climate_factor_clean = climate_factor_series[mask]
+
+        if y_clean.empty or X_controls_clean.empty or climate_factor_clean.empty:
+            logging.info(f"Insufficient clean data for {stock_ticker} on {beta_date}, skipping...")
+            continue  # Skip if no clean data
+
+        try:
+            # Estimate beta for the climate factor using the regression function
+            beta = estimate_climate_beta(y_clean, climate_factor_clean, X_controls_clean)
+
+            # Append the estimated beta to the results list
+            beta_estimates.append({
+                'stock_ticker': stock_ticker,
+                'date': beta_date,
+                'beta_climate': beta
+            })
+        except Exception as e:
+            # Skip this window if regression fails
+            logging.error(f"Regression failed for stock {stock_ticker} on date {beta_date}: {e}")
+            continue
+
+    return beta_estimates
+
+
+
+def process_climate_topic_model(combined_df, climate_topic, ff_model, output_dir):
+    """
+    Processes a single climate topic and Fama-French model, saving the results after processing.
+
+    - combined_df: DataFrame - The main dataset
+    - climate_topic: str - Climate topic column name
+    - ff_model: str - Fama-French model ('FF3', 'FF4', 'FF5')
+    - output_dir: str - Directory where results will be saved
+
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Get a list of unique stock tickers
+    stock_tickers = combined_df['stock_ticker'].unique()
+
+    logging.info(f"\nProcessing Climate Topic: {climate_topic}, Fama-French Model: {ff_model}")
+
+    all_beta_estimates = []
+
+    # Iterate over each stock ticker
+    for ticker in tqdm(stock_tickers, desc=f'Estimating Betas for {climate_topic} with {ff_model}'):
+        # Estimate betas for the stock and climate topic
+        betas = estimate_betas_for_stock_and_topic(ticker, climate_topic, ff_model, combined_df)
+        all_beta_estimates.extend(betas)
+
+    # Adjust the filename for clarity
+    # Extract topic number and type for the filename
+    topic_parts = climate_topic.split('_')  # Splits 'Topic_16_physical' into ['Topic', '16', 'physical']
+    topic_number = topic_parts[1]
+    topic_type = topic_parts[2]
+    filename = f"beta_Topic_{topic_number}_{topic_type}_{ff_model}.json"
+    filepath = os.path.join(output_dir, filename)
+
+    # Save the beta estimates to the JSON file
+    with open(filepath, 'w') as f:
+        json.dump(all_beta_estimates, f, indent=4)
+
+
+def run_beta_estimation(combined_df, climate_topics, ff_models, output_base_dir):
+    """
+    Runs beta estimation for all combinations of climate topics and Fama-French models.
+
+    - combined_df: DataFrame - The main dataset containing stock data, climate factors, and Fama-French factors.
+    - climate_topics: list of str - List of climate topic column names.
+    - ff_models: list of str - List of Fama-French models to use ('FF3', 'FF4', 'FF5').
+    - output_base_dir: str - Base directory where beta estimates will be saved.
+
+    """
+    # Go through each climate topic
+
+    for climate_topic in climate_topics:
+
+        for ff_model in ff_models:
+            # Define the output directory for the current combination
+            output_dir = os.path.join(output_base_dir, f"{climate_topic}_{ff_model}")
+            
+            # Process the current climate topic and Fama-French model
+            process_climate_topic_model(combined_df, climate_topic, ff_model, output_dir)
+
+    logging.info("\nBeta estimation process completed for all climate topics and Fama-French models.")
+
+# ---------------------------
+# 11. Define Output Directory
+# ---------------------------
+
+# Define the directory where beta estimations will be saved
+beta_output_base_dir = '/Users/Desktop/Beta  # <----- Change direction/file path for running code
+
+os.makedirs(beta_output_base_dir, exist_ok=True)
+
+# ---------------------------
+# 12. Run Beta Estimation If Flag is True
+# ---------------------------
+
+if run_beta_estimation:
+    run_beta_estimation(combined_df, climate_topics, ff_models, beta_output_base_dir)
