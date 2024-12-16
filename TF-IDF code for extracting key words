@@ -225,7 +225,7 @@ transition_folder_path = '/Users/Reports/Transition'
 
 transition_file_names = [
     'SR15.4.pdf', 'SR15.2.pdf', 'SNS.pdf', 'Ren.pdf', 'S23.pdf', 
-    'AR6.mit.pdf', 'AR6.18.pdf', 'AR6.17.pdf', 'AR6.pdf', 'CCS.pdf', 
+    'AR6.mit.pdf', 'AR6.18.pdf', 'AR6.pdf', 'CCS.pdf', 
     'AR5.pdf', 'S8.7.pdf', 'S8.1-5.pdf', 'AR3.pdf', 'AR4.pdf'
 ]
             
