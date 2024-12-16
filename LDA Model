@@ -1,0 +1,1323 @@
+
+
+# ==============================================================================
+# LDA Model - Text Analysis Pipeline for Swedish Articles
+# ==============================================================================
+#
+#
+# This script performs the following tasks in order:
+#
+# 1. Import Libraries:
+#    - Loads all necessary Python libraries for data processing, modelling, and visualization.
+#
+# 2. Configure Logging:
+#    - Sets up logging to track the script's progress and record any issues.
+#
+# 3. Defining Custom Stopwords:
+#    - Loads a list of common Swedish words (stopwords) that should be removed from the text data to focus on meaningful terms.
+#
+# 4. Fetch Common Names:
+#    - Retrieves lists of popular first and last names from online sources to exclude them from the analysis.
+#
+# 5. Load SpaCy Model:
+#    - Loads the Swedish language model from SpaCy for advanced text processing tasks like lemmatization.
+#
+# 6. Load Data:
+#    - Reads the dataset from a JSON file, ensuring it contains the necessary columns (e.g., 'date' and 'text').
+#    - Attempts different encodings if the initial read fails.
+#
+# 7. Preprocess Texts:
+#    - Cleans the text data by removing unwanted lines, emails, URLs, and non-alphabetic characters.
+#    - Converts all text to lowercase for uniformity.
+#
+# 8. Lemmatization:
+#    - Reduces words to their base or dictionary form using SpaCy, focusing on nouns, adjectives, verbs, and adverbs.
+#
+# 9. Remove Stopwords and Common Names:
+#    - Filters out the custom stopwords and common names from the lemmatized texts to retain only relevant words.
+#
+# 10. Build and Apply Bigrams:
+#     - Identifies and combines frequently occurring pairs of words (bigrams) to capture common phrases.
+#
+# 11. Build Dictionary and Corpus:
+#     - Creates a dictionary mapping of words and a corpus in the bag-of-words format required for topic modeling.
+#
+# 12. Train LDA Model:
+#     - Trains a Latent Dirichlet Allocation (LDA) model to discover underlying topics within the text data.
+#     - Evaluates the model's coherence to assess topic quality.
+#
+# 13. Evaluate Topic Coherence:
+#     - Calculates coherence scores for each topic to determine how "meaningful" and distinct they are.
+#
+# 14. Compute Topic Shares:
+#     - Analyzes the distribution of topics over time, calculating daily and monthly shares to observe trends.
+#
+# 15. Generate Visualizations:
+#     - Creates word clouds for each topic to visualize the most important words.
+#     - Generates interactive visualizations using tools like pyLDAvis for deeper exploration of topics.
+#
+# 16. Save Outputs:
+#     - Saves the trained LDA model, dictionary, corpus, topic shares, and visualizations to a specified directory for future reference.
+#
+# 17. Run the Pipeline:
+#     - Executes all the above steps in the correct order when the script is run.
+#
+# ------------------------------------------------------------
+#
+# Purpose: This script identifies and quantifies topics related to climate change—both physical and transition risks—from collections of articles. 
+# It calculates the document-topic distribution (θ) - (topic shares) - which will be used in asset pricing models to investigate whether these risks are factored into stock prices.
+#
+# ======================================================================
+
+
+# ---------------------------
+# Import Libraries
+# ---------------------------
+
+
+# Standard Library Imports
+import os
+import pandas as pd
+import numpy as np
+import json
+import logging
+import re
+import random
+import time
+import warnings
+import numbers
+import seaborn as sns
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+# Textual Modelling Imports 
+import spacy
+import gensim
+from gensim import corpora
+from gensim.models import LdaModel, CoherenceModel
+from gensim.models.phrases import Phrases, Phraser
+from collections import defaultdict, Counter
+from wordcloud import WordCloud
+import pyLDAvis
+import pyLDAvis.gensim_models as gensimvis
+
+# Visualization Imports
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.colors as mcolors
+from matplotlib.colors import to_rgb, to_hex
+
+# Interactive Visualization Imports
+from bokeh.plotting import figure, show, output_file, save
+from bokeh.models import HoverTool, ColumnDataSource, Range1d
+from bokeh.layouts import row
+from bokeh.palettes import Category20, Category20b, Category20c
+import webbrowser
+from sklearn.manifold import TSNE
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+
+
+
+
+# ---------------------------
+# Configure Logging
+# ---------------------------
+logging.basicConfig(
+    format='%(asctime)s : %(levelname)s : %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("preprocessing.log", mode='a', encoding='latin1', errors='replace')
+    ]
+)
+
+# ---------------------------
+# 2. Define Custom Stopword List
+# ---------------------------
+
+def get_custom_stopwords():
+    """
+    Returns a list of custom stopwords to be removed from the corpus.
+    """
+    custom_stopwords = [
+        "aderton", "adertonde", "adjö", "aldrig", "all", "alla", "allas", "allt",
+        "alltid", "alltså", "andra", "andras", "annan", "annat", "arton",
+        "artonde", "att", "av", "bakom", "bara", "behöva", "behövas", "behövde",
+        "behövt", "beslut", "beslutat", "beslutit", "bland", "blev", "bli",
+        "blir", "blivit", "borde", "bort", "borta", "bra", "bäst", "bättre",
+        "båda", "bådas", "både", "dag", "dagar", "dagarna", "dagbladet", "dagen", "de",
+        "del", "delen", "dem", "den", "denna", "deras", "dess", "dessa", "det",
+        "detta", "dig", "din", "databas", "databasen", "dina", "dit", "ditt", "dock", "dom", "du",
+        "där", "därför", "då", "efter", "eftersom", "ej", "elfte", "eller",
+        "elva", "en", "enkel", "expressen", "enkelt", "enklare", "enklast", "enkla", "enligt", "er", "era", "ert",
+        "ett", "ettusen", "fall", "forskare", "fanns", "fast", "fem", "femte", "femtio",
+        "femtionde", "femton", "femtonde", "fortsätta", "fick", "fin", "finnas", "finns",
+        "fjorton", "fjortonde", "fjärde", "fler", "flera", "flesta", "fram",
+        "framför", "från", "fyra", "fyrtio", "fyrtionde", "få", "får", "fått",
+        "följande", "för", "före", "förlåt", "förra", "första", "ge", "genast",
+        "genom", "ger", "gick", "gjorde", "gjort", "god", "goda", "godare",
+        "godast", "gott", "gälla", "gäller", "gällt", "gärna", "gå", "gång",
+        "går", "gått", "gör", "göra", "ha", "hade", "haft", "han", "hans", "har",
+        "hela", "heller", "hellre", "helst", "helt", "henne", "hennes", "heter",
+        "hit", "hjälp", "hon", "honom", "hundra", "hundraen", "hundraett", "hur",
+        "här", "hög", "höger", "högre", "högst", "i", "ibland", "icke", "idag",
+        "igen", "igår", "imorgon", "in", "inför", "inga", "ingen", "ingenting",
+        "inget", "innan", "inne", "inom", "inte", "inuti", "ja", "jag", "ju",
+        "jämfört", "kan", "kanske", "knappast", "kolla", "kl", "kom", "komma", "kommer",
+        "kommit", "kr", "kunde", "kunna", "kunnat", "kvar", "kör", "legat",
+        "ligga", "ligger", "lika", "likställd", "likställda", "lilla", "lite",
+        "liten", "litet", "lägga", "länge", "land", "längre", "längst", "lätt", "lättare",
+        "lättast", "långsam", "långsammare", "långsammast", "långsamt", "långt",
+        "man", "med", "mellan", "men", "menar", "mer", "mera", "mest", "mig",
+        "min", "mina", "mindre", "minst", "mitt", "mittemot", "människa", "mot", "mycket",
+        "många", "måste", "möjlig", "möjligen", "möjligt", "möjligtvis", "ned",
+        "nederst", "nedersta", "ny", "nedre", "nej", "ner", "ni", "nio", "nionde",
+        "nittio", "nittionde", "nitton", "nittonde", "nog", "noll", "nr", "nu",
+        "nummer", "namn", "nya", "när", "nästa", "någon", "någonting", "något", "några",
+        "nån", "nåt", "nödvändig", "nödvändiga", "nödvändigt", "nödvändigtvis",
+        "och", "också", "ofta", "oftast", "olika", "olikt", "om", "oss", "procent",
+        "på", "rakt", "person", "retrieva", "retriever", "redan", "rätt", "sade", "sagt", "samma", "samt", "sedan",
+        "sen", "senare", "senast", "sent", "ser", "se", "sex", "sextio", "sextionde",
+        "sexton", "sextonde", "sig", "sin", "sina", "sist", "sista", "siste",
+        "sitt", "sitta", "sju", "sjunde", "sjuttio", "sjuttionde", "sjutton",
+        "sjuttonde", "själv", "sjätte", "ska", "skall", "skriver", "skulle",
+        "slutligen", "små", "smått", "snart", "som", "svensk", "stor", "stora", "stort",
+        "står", "stå", "större", "störst", "säga", "säger", "sämre", "sämst", "sätt",
+        "så", "sådan", "sådana", "sådant", "tt", "ta", "tack", "tar", "tidig",
+        "tidigare", "tidigast", "tidigt", "till", "tills", "tillsammans", "tio",
+        "tionde", "tjugo", "tjugoen", "tjugoett", "tjugonde", "tjugotre",
+        "tjugotvå", "tjungo", "tog", "tolfte", "tolv", "tre", "tredje", "trettio",
+        "trettionde", "tretton", "trettonde", "tro", "tror", "två", "tvåhundra",
+        "under", "upp", "ur", "ursäkt", "ut", "utan", "utanför", "ute", "utom",
+        "vad", "var", "vara", "varför", "varifrån", "varit", "varje", "varken",
+        "vars", "varsågod", "värld", "vart", "vem", "vems", "verkligen", "vet", "vi",
+        "vid", "vidare", "viktig", "viktigare", "viktigast", "viktigt", "vilka",
+        "vilkas", "vilken", "vilket", "vill", "visa", "visst", "väl", "vänster", "vänstra",
+        "värre", "vår", "våra", "vårt", "än", "ändå", "år", "ännu", "är", "även", "året",
+        "åt", "åtminstone", "åtta", "åttio", "åttionde", "åttonde", "över",
+        "övermorgon", "överst", "övre"
+    ]
+    logging.info(f"Custom stopword list loaded with {len(custom_stopwords)} words.")
+    return custom_stopwords
+
+# ---------------------------
+# 3. Fetch Common Names
+# ---------------------------
+
+def fetch_common_names():
+    """
+    Fetches common men's, women's, and last names from predefined URLs.
+
+    Returns:
+    - list: Combined list of common names.
+    """
+    logging.info("Fetching common names from online sources...")
+
+    common_names = []
+
+    # Find and fetch top 5 men's names
+    men_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/fornamn-man.csv"
+    try:
+        men_names_df = pd.read_csv(men_names_url, encoding='latin1')
+        men_names_df = men_names_df.sort_values(by='persons', ascending=False)
+        common_men_names = men_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_men_names])
+        logging.info(f"Fetched top 5 common men's names: {common_men_names}")
+    except Exception as e:
+        logging.error(f"Error fetching men's names from {men_names_url}: {e}")
+
+    # Find and fetch top 5 women's names
+    women_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/fornamn-kvinnor.csv"
+    try:
+        women_names_df = pd.read_csv(women_names_url, encoding='latin1')
+        women_names_df = women_names_df.sort_values(by='persons', ascending=False)
+        common_women_names = women_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_women_names])
+        logging.info(f"Fetched top 5 common women's names: {common_women_names}")
+    except Exception as e:
+        logging.error(f"Error fetching women's names from {women_names_url}: {e}")
+
+    # Find and fetch 5 last names
+    last_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/efternamn.csv"
+    try:
+        last_names_df = pd.read_csv(last_names_url, encoding='latin1')
+        last_names_df = last_names_df.sort_values(by='persons', ascending=False)
+        common_last_names = last_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_last_names])
+        logging.info(f"Fetched top 5 common last names: {common_last_names}")
+    except Exception as e:
+        logging.error(f"Error fetching last names from {last_names_url}: {e}")
+
+    logging.info(f"Total common names fetched: {len(common_names)}")
+    return common_names
+
+# ---------------------------
+# 4. Load and Initialize SpaCy
+# ---------------------------
+
+def load_spacy_model():
+    """
+    Load the SpaCy Swedish model, downloading it if not present.
+
+    Returns:
+    - spacy.language.Language: The loaded SpaCy model.
+    """
+    model_name = 'sv_core_news_sm'
+    try:
+
+        nlp = spacy.load(model_name, disable=['ner'])
+        logging.info(f"SpaCy model '{model_name}' loaded successfully with 'ner' disabled.")
+        return nlp
+    except OSError:
+        logging.warning(f"SpaCy model '{model_name}' not found. Attempting to download...")
+        try:
+            spacy.cli.download(model_name)
+            nlp = spacy.load(model_name, disable=['ner'])
+            logging.info(f"SpaCy model '{model_name}' downloaded and loaded successfully.")
+            return nlp
+        except Exception as e:
+            logging.error(f"Failed to download and load SpaCy model '{model_name}': {e}")
+            raise
+    except Exception as e:
+        logging.error(f"Error loading SpaCy model: {e}")
+        raise
+
+# ---------------------------
+# 5. Load Data
+# ---------------------------
+
+def load_data(filepath):
+    logging.info(f"Loading data from {filepath}...")
+    encodings_to_try = ['utf-8', 'latin1', 'cp1252']
+    for encoding in encodings_to_try:
+        try:
+            with open(filepath, 'r', encoding=encoding) as file:
+                data = json.load(file)
+            df = pd.DataFrame(data)
+            if 'date' not in df.columns:
+                logging.error("Date column not found in the data.")
+                raise ValueError("Date column is required in the data.")
+            df['date'] = pd.to_datetime(df['date'])
+            logging.info(f"Data loaded successfully with encoding '{encoding}' and {len(df)} records.")
+            return df
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logging.warning(f"Failed to read file with encoding '{encoding}': {e}")
+            continue
+        except FileNotFoundError:
+            logging.error(f"The file {filepath} does not exist. Please check the file path and name.")
+            raise
+        except Exception as e:
+            logging.error(f"Error loading data from {filepath} with encoding '{encoding}': {e}")
+            raise
+    logging.error("Failed to load data with all tried encodings.")
+    raise ValueError("Cannot read the file with encodings.")
+
+# ---------------------------
+# 6. Preprocessing (with Bigrams)
+# ---------------------------
+
+def preprocess_texts(texts):
+    logging.info("Starting text preprocessing...")
+    
+    unwanted_lines = [
+        r'Karén\. Databasens namn: Fredric Karén /  / retriever- info\.com',
+        r'Databasens namn: Lena K Samuelsson / Aftonbladet / retriever- info\.com',
+        r'Granström\. Databasens namn: Klas Granström /',
+        r'Databasens namn:',
+        r'Image-text',
+        r'Aftonbladet',
+        r'Expressen',
+        r'Dagens Nyheter',
+        r'Svenska Dagbladet',
+        r'Dagens Industri', 
+        r'retriever- info\.com',
+        r'PRESSBILD'
+    ]
+    
+    # All unwanted lines are cominded into a single regex pattern and removed
+    unwanted_pattern = '|'.join(unwanted_lines)
+    
+    removal_count = 0
+    
+    def remove_unwanted(text):
+        nonlocal removal_count
+        new_text, num_subs = re.subn(unwanted_pattern, '', text)
+        removal_count += num_subs
+        return new_text
+    
+    # Removal function
+    texts = [remove_unwanted(text) for text in texts]
+    logging.info(f"Removed unwanted footnote lines {removal_count} times.")
+    
+    # Further preprocessing steps
+
+    - processed_texts: Preprocessed and tokenized text
+    - stopwords_set: Set of stopwords that should been removed
+    - sample_size: Number of documents 
+
+    # Remove emails
+    texts = [re.sub(r'\S*@\S*\s?', '', text) for text in texts]
+
+    # Remove URLs
+    texts = [re.sub(r'http\S+|www\S+', '', text) for text in texts]
+
+    # Remove new line characters
+    texts = [re.sub(r'\s+', ' ', text) for text in texts]
+
+    # Remove single quotes
+    texts = [re.sub(r"\'", "", text) for text in texts]
+
+    # Remove non-alphabetic characters (excluding Swedish characters)
+    texts = [re.sub(r'[^a-zA-ZåäöÅÄÖ\s]', '', text) for text in texts]
+
+    # Convert to lowercase
+    texts = [text.strip().lower() for text in texts]
+    
+    logging.info("Text preprocessing completed.")
+    return texts
+
+def lemmatization(texts, nlp, allowed_postags=['NOUN', 'ADJ', 'VERB', 'ADV']):
+    logging.info("Starting lemmatization...")
+    texts_out = []
+    for doc in nlp.pipe(texts, batch_size=50, n_process=1):
+        lemmatized = []
+        for token in doc:
+            if token.pos_ in allowed_postags:
+                lemma = token.lemma_.lower()
+                lemmatized.append(lemma)
+        texts_out.append(lemmatized)
+    logging.info("Lemmatization completed.")
+    return texts_out
+
+def remove_stopwords(lemmatized_texts, stopwords_set):
+    logging.info("Removing stopwords and common names...")
+    processed_texts = [
+        [token for token in doc if token not in stopwords_set]
+        for doc in lemmatized_texts
+    ]
+    logging.info("Stopwords and common names removal completed.")
+    return processed_texts
+
+def check_stopword_removal(processed_texts, stopwords_set, sample_size=5):
+
+    """
+
+    Check that stopwords have been removed from the processed texts and logged.
+    Logs whether stopwords are present in sampled documents.
+
+    """
+
+    - top_n (int): Number of top frequent words to display
+    - bottom_n (int): Number of least frequent words to display
+
+    logging.info("Checking if stopwords have been removed from the processed texts...")
+    if len(processed_texts) == 0:
+        logging.warning("No documents to check for stopwords.")
+        return
+
+    actual_sample_size = min(sample_size, len(processed_texts))
+    sample_indices = random.sample(range(len(processed_texts)), actual_sample_size)
+    for idx in sample_indices:
+        doc = processed_texts[idx]
+        remaining_stopwords = set(doc).intersection(stopwords_set)
+
+        if remaining_stopwords:
+            logging.warning(f"Stopwords found in document {idx}: {remaining_stopwords}")
+        else:
+            logging.info(f"No stopwords found in document {idx}.")
+
+def count_remaining_stopwords(processed_texts, stopwords_set):
+    total_remaining = sum(len(set(doc).intersection(stopwords_set)) for doc in processed_texts)
+    logging.info(f"Total remaining stopwords across all documents: {total_remaining}")
+
+def analyze_word_frequency(processed_texts, top_n=40, bottom_n=40):
+
+    """
+    Analyze and print the most and least frequent words in the corpus.
+
+    Return word_freq: Word frequency
+
+    """
+    word_freq = defaultdict(int)
+    for doc in processed_texts:
+        for word in doc:
+            word_freq[word] += 1
+
+    # Sort words by frequency in downward order
+    sorted_word_freq = sorted(word_freq.items(), key=lambda item: item[1], reverse=True)
+
+    print(f"\n--- Top {top_n} Most Frequent Words ---\n")
+    for word, freq in sorted_word_freq[:top_n]:
+        print(f"{word}: {freq}")
+
+    print(f"\n--- Bottom {bottom_n} Least Frequent Words ---\n")
+    for word, freq in sorted_word_freq[-bottom_n:]:
+        print(f"{word}: {freq}")
+
+    return word_freq
+
+def build_bigram_model(processed_texts, min_count=5, threshold=100):
+
+    """
+    Build and return a bigram model and a phraser.
+
+    - min_count: Minimum count of word pairs
+    - threshold: Threshold for forming the phrases (higher means fewer phrases)
+
+    Returns:
+    - bigram_model (gensim.models.Phrases): The bigram model.
+    - bigram_phraser (gensim.models.phrases.Phraser): The phraser for transforming texts.
+
+    """
+
+    logging.info("Building bigram model...")
+    bigram_model = Phrases(processed_texts, min_count=min_count, threshold=threshold, delimiter='_')
+    bigram_phraser = Phraser(bigram_model)
+    logging.info("Bigram model built successfully.")
+    return bigram_model, bigram_phraser
+
+def apply_bigrams(bigram_phraser, texts):
+    """
+    Apply the bigram phraser to the tokenized texts.
+
+    - texts (list of list of str): Tokenized texts.
+
+    Returns:
+    - bigrammed_texts: Texts with bigrams applied.
+    """
+    logging.info("Applying bigram model to texts...")
+    bigrammed_texts = [bigram_phraser[text] for text in texts]
+    logging.info("Bigrams applied successfully.")
+    return bigrammed_texts
+
+def check_swedish_characters(texts, step_description):
+
+    """
+    Checking that ['å', 'ä', 'ö'] is present and read correctly 
+
+    """
+
+
+    swedish_characters = ['å', 'ä', 'ö']
+    for idx, text in enumerate(texts[:5]):  # Check the first 5 texts
+        if isinstance(text, list):
+            joined_text = ' '.join(text)
+        else:
+            joined_text = text
+        characters_present = {char: char in joined_text for char in swedish_characters}
+        logging.info(f"{step_description} - Document {idx} Swedish characters presence: {characters_present}")
+
+def preprocess_pipeline(texts, stopwords, common_names, nlp, build_bigrams=True, min_count=5, threshold=100):
+    """
+    Complete preprocessing pipeline: cleaning, lemmatization, bigram detection, and stopword removal.
+
+    - texts: Raw text documents.
+    - stopwords: List of stopwords to remove.
+    - common_names: List of common names to remove.
+    - nlp: SpaCy language model.
+    - build_bigrams: Whether to build and apply bigrams.
+    - min_count: Minimum count for bigram detection.
+    - threshold: Threshold for bigram detection.
+
+    Returns:
+    - processed_texts: Preprocessed and tokenized texts with bigrams.
+    - bigram_model (gensim.models.Phrases or None): The bigram model if built, else None.
+    - bigram_phraser (gensim.models.Phrases.Phraser or None): The phraser if built, else None.
+    """
+    # Step 1: Clean texts
+
+    cleaned_texts = preprocess_texts(texts)
+    # Check Swedish characters after cleaning
+    check_swedish_characters(cleaned_texts, "After preprocessing texts")
+
+    # Step 2: Lemmatize texts
+
+    lemmatized_texts = lemmatization(cleaned_texts, nlp)
+    # Check Swedish characters after lemmatization
+    check_swedish_characters(lemmatized_texts, "After lemmatization")
+
+    # Step 3: Build and apply bigrams
+
+    bigram_model, bigram_phraser = None, None
+    if build_bigrams:
+        bigram_model, bigram_phraser = build_bigram_model(lemmatized_texts, min_count=min_count, threshold=threshold)
+        lemmatized_texts = apply_bigrams(bigram_phraser, lemmatized_texts)
+        logging.info("Bigrams integrated into processed texts.")
+
+    # Step 4: Combine stopwords and common names
+
+    combined_stopwords = set([word.lower() for word in stopwords] + [name.lower() for name in common_names])
+
+    # Step 5: Remove stopwords and common names
+
+    processed_texts = remove_stopwords(lemmatized_texts, combined_stopwords)
+
+    # Step 6: Check Swedish characters after stopword removal
+    check_swedish_characters(processed_texts, "After stopword removal")
+
+    # Step 7: Check stopword removal
+
+    check_stopword_removal(processed_texts, combined_stopwords, sample_size=5)
+
+    # Step 8: Count remaining stopwords
+
+    count_remaining_stopwords(processed_texts, combined_stopwords)
+
+    return processed_texts, bigram_model, bigram_phraser
+
+# ---------------------------
+# 7. Building the Dictionary and Corpus
+# ---------------------------
+
+def build_dictionary_and_corpus(processed_texts, no_below=50, no_above=0.5):
+    logging.info("Building dictionary and corpus...")
+
+    # Create Dictionary
+    dictionary = corpora.Dictionary(processed_texts)
+    logging.info(f"Initial dictionary size: {len(dictionary)}")
+
+    # Filter out extremes to limit the number of features
+    dictionary.filter_extremes(no_below=no_below, no_above=no_above)
+    logging.info(f"Dictionary size after filtering: {len(dictionary)}")
+
+    # Filter processed_texts to only include words in the filtered dictionary
+    filtered_texts = [[word for word in text if word in dictionary.token2id] for text in processed_texts]
+    logging.info("Processed texts have been filtered to match the dictionary vocabulary.")
+
+    # Create Corpus: Term Document Frequency
+    corpus = [dictionary.doc2bow(text) for text in filtered_texts]
+    logging.info(f"Corpus size: {len(corpus)}")
+
+    return dictionary, corpus, filtered_texts
+
+# ---------------------------
+# 8. LDA Model Training and Evaluation
+# ---------------------------
+
+def train_lda_model(dictionary, corpus, texts, k=20, alpha=0.01, beta=0.001, passes=20, iterations=100, random_state=42):
+    """
+    Train LDA model with specified parameters and evaluate its coherence.
+
+
+    - dictionary (gensim.corpora.Dictionary): The dictionary mapping
+    - corpus: The corpus in bag-of-words format
+    - texts: The preprocessed and tokenized texts
+    - k: Number of topics
+    - alpha: Hyperparameter for document-topic density
+    - beta: Hyperparameter for topic-word density
+    - passes: Number of passes through the corpus during training
+    - iterations: Number of iterations per pass
+    - random_state: Seed for reproducibility, set at 42
+
+    Returns:
+    - lda_model (gensim.models.LdaModel): The trained LDA model.
+    - coherence_score: The coherence score (c_v) of the model.
+    """
+    logging.info(f"Training LDA model with k={k}, alpha={alpha}, beta={beta}...")
+    lda_model = LdaModel(
+        corpus=corpus,
+        id2word=dictionary,
+        num_topics=k,
+        random_state=random_state,
+        passes=passes,
+        alpha=alpha,
+        eta=beta,
+        iterations=iterations,
+        per_word_topics=True,
+        update_every=0  # Update after each document
+    )
+    logging.info("LDA model training completed.")
+
+    # Compute Coherence Score (c_v)
+    coherence_model = CoherenceModel(
+        model=lda_model,
+        texts=texts,
+        dictionary=dictionary,
+        coherence='c_v'
+    )
+    coherence_score = coherence_model.get_coherence()
+    logging.info(f"LDA Model Coherence Score (c_v): {coherence_score}")
+
+    return lda_model, coherence_score
+
+# ---------------------------
+# Evaluate Topic: Coherence Scores for each Topic
+# ---------------------------
+
+def evaluate_topic_coherence(lda_model, texts, dictionary, top_n=20):
+    """
+    Evaluate the coherence of individual topics in the LDA model.
+
+    - lda_model (gensim.models.LdaModel): The trained LDA model.
+    - texts (list of list of str): Tokenized and preprocessed texts.
+    - dictionary (gensim.corpora.Dictionary): The dictionary mapping.
+    - top_n (int): Number of top words to consider for each topic.
+
+    Returns:
+    - pd.DataFrame: df containing topic IDs, top words, and their coherence scores.
+    """
+    logging.info("Starting evaluation of topic coherence for each topic...")
+
+    topic_coherence_scores = []
+
+    # Get the top words for each topic
+    topics = lda_model.show_topics(formatted=False, num_topics=lda_model.num_topics, num_words=top_n)
+
+    for topic_id, topic in topics:
+
+        top_words = [word for word, _ in topic]
+
+        # Creating coherence model for topic
+        coherence_model = CoherenceModel(
+            topics=[top_words],
+            texts=texts,
+            dictionary=dictionary,
+            coherence='c_v'
+        )
+
+        # Compute the coherence score for the topic
+        coherence_score = coherence_model.get_coherence()
+        topic_coherence_scores.append({
+            'Topic_ID': topic_id,
+            'Top Words': ", ".join(top_words),
+            'Coherence Score (c_v)': round(coherence_score, 4)
+        })
+
+        logging.info(f"Coherence Score for Topic {topic_id}: {coherence_score}")
+        print(f"Coherence Score for Topic {topic_id}: {coherence_score}")
+
+    coherence_df = pd.DataFrame(topic_coherence_scores)
+    return coherence_df
+
+# ---------------------------
+# 10. List Topics with Coherence Scores
+# ---------------------------
+
+def list_topics_with_coherence(lda_model, coherence_score, top_n=20):
+    """
+    Print the list of topics with their top words and the model's coherence score.
+
+    """
+
+    print("\n--- Topics and Top Words ---\n")
+    for idx, topic in lda_model.show_topics(formatted=False, num_topics=lda_model.num_topics, num_words=top_n):
+        print(f"Topic {idx}:")
+        print(", ".join([word for word, _ in topic]))
+        print()
+    print(f"Overall Coherence Score (c_v): {coherence_score}\n")
+
+
+# ---------------------------
+# Generate Word Cloud
+# ---------------------------
+
+
+def generate_word_clouds(
+    lda_model,
+    dictionary,
+    save_dir,
+    top_n=120,
+    emphasize_top=5,
+    amplification=3
+):
+
+    logging.info("Starting generation of word clouds for each topic...")
+
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+        logging.info(f"Created save directory at '{save_dir}'.")
+
+    topics = lda_model.show_topics(formatted=False, num_topics=lda_model.num_topics, num_words=top_n)
+
+    for topic_id, topic in tqdm(topics, desc="Generating Word Clouds", unit="topic"):
+        freq_dict = {word: weight for word, weight in topic}
+
+        # Amplify the frequencies of the top `emphasize_top` words
+        sorted_words = sorted(freq_dict.items(), key=lambda item: item[1], reverse=True)
+        top_words = sorted_words[:emphasize_top]
+        for word, freq in top_words:
+            freq_dict[word] = freq * amplification  # Amplify frequency
+
+        # Define a custom color function
+        def color_func(word, font_size, position, orientation, random_state=None, **kwargs):
+            # Normalize the font size to get a value between 0 and 1
+            max_size = 150  # Adjust based on max_font_size below
+            normalized_size = font_size / max_size
+            # Set grey scale factor for color intensity
+            grey_scale_factor = 200
+            # Calculate grey level
+            grey_level = int(255 - (normalized_size * grey_scale_factor))  # Darker for larger words
+            grey_level = max(0, min(255, grey_level))  # Ensure within valid range
+            return f'rgb({grey_level}, {grey_level}, {grey_level})'
+
+        wc = WordCloud(
+            width=800,
+            height=800,
+            background_color='white',
+            colormap='Greys',
+            prefer_horizontal=1.0,  # words horizontal
+            max_font_size=150,
+            min_font_size=12,        # <--- Test increased for better readability in plot
+            font_path=font_path,
+            random_state=42,
+            scale=2.5,
+            max_words=top_n
+        )
+
+        wc.generate_from_frequencies(freq_dict)
+
+        # Apply the custom color function
+        wc.recolor(color_func=color_func, random_state=42)
+
+        plt.figure(figsize=(10, 10))
+        plt.imshow(wc, interpolation='bilinear')
+        plt.axis('off')
+        plt.title(
+            f'Topic {topic_id}',
+            fontsize=20,
+            fontweight='bold',
+            fontname='Times New Roman'
+        )
+
+        wc_filename = f'word_cloud_topic_{topic_id}.png'
+        wc_path = os.path.join(save_dir, wc_filename)
+        plt.savefig(wc_path, bbox_inches='tight', pad_inches=0.1)
+        plt.close()
+
+        logging.info(f"Word cloud for Topic {topic_id} saved as '{wc_path}'.")
+
+        top_word_list = [word for word, weight in sorted_words[:top_n]]
+
+        top_words_filename = f'word_cloud_topic_{topic_id}_top_words.txt'
+        top_words_path = os.path.join(save_dir, top_words_filename)
+        with open(top_words_path, 'w') as f:
+            f.write(f"Topic {topic_id} Top Words:\n")
+            f.write(", ".join(top_word_list))
+        logging.info(f"Top words for Topic {topic_id} saved as '{top_words_path}'.")
+
+
+# --------------------------------
+# Generate Interactive Web browser: pyladavis
+# --------------------------------
+
+
+def visualize_pyladavis(lda_model, corpus, dictionary, save_dir, output_filename='pyLDAvis.html'):
+
+    """
+    Visualize the LDA model using pyLDAvis and save the output to an HTML file.
+
+    """
+
+    logging.info("Starting pyLDAvis visualization...")
+
+    try:
+        # Prepare the pyLDAvis visualization
+        vis = gensimvis.prepare(lda_model, corpus, dictionary)
+
+        # Define the full output path
+        output_filepath = os.path.join(save_dir, output_filename)
+
+        # Save the visualization to an HTML file
+        pyLDAvis.save_html(vis, output_filepath)
+        logging.info(f"pyLDAvis visualization saved to '{output_filepath}'")
+
+        # Introduce a small delay
+        time.sleep(2)
+
+        # Open the visualization in a web browser
+        webbrowser.open_new_tab(f"file://{os.path.abspath(output_filepath)}")
+
+    except Exception as e:
+        logging.error(f"Error during pyLDAvis visualization: {e}")
+
+    except Exception as e:
+        logging.error(f"Error during pyLDAvis visualization: {e}")
+
+
+def save_beta_k(lda_model, dictionary, save_dir):
+
+    """
+    Save the topic-word distributions (βₖ) to a JSON file.
+
+    """
+
+
+    logging.info("Extracting and saving topic-word distributions (*βₖ*)...")
+
+    beta_k = lda_model.get_topics()  # Shape: (num_topics, vocabulary_size)
+    num_topics, vocab_size = beta_k.shape
+
+    beta_k_list = []
+    for topic_id in range(num_topics):
+        topic_word_probs = {}
+        for word_id in range(vocab_size):
+            word = dictionary[word_id]
+            prob = beta_k[topic_id][word_id]
+            topic_word_probs[word] = prob
+        beta_k_list.append({
+            "Topic_ID": topic_id,
+            "Word_Distribution": topic_word_probs
+        })
+
+    # Define the file path
+    beta_k_path = os.path.join(save_dir, 'beta_k_topic_word_distributions.json')
+
+    # Save to JSON
+    try:
+        with open(beta_k_path, 'w', encoding='utf-8') as f:
+            json.dump(beta_k_list, f, ensure_ascii=False, indent=4)
+        logging.info(f"Topic-word distributions (*βₖ*) saved as '{beta_k_path}'.")
+    except Exception as e:
+        logging.error(f"Failed to save topic-word distributions: {e}")
+
+# ---------------------------
+# Computing daily and monthly topic shares - NORMALIZED ON WEIGHT
+# ---------------------------
+
+def compute_daily_and_monthly_topic_shares(lda_model, corpus, sampled_df, K):
+    """
+
+    - lda_model: Trained LDA model.
+    - corpus: Corpus in bag-of-words format.
+    - sampled_df: DataFrame containing the documents and their dates.
+    - K: Number of topics.
+
+    Returns:
+    - daily_topic_shares: DataFrame with daily topic shares.
+    - monthly_topic_shares: DataFrame with monthly topic shares.
+    """
+
+    import numpy as np
+    import pandas as pd
+
+    doc_topics = []
+    doc_dates = []
+
+    for i, doc_bow in enumerate(corpus):
+        # Get the document's date
+        doc_date = sampled_df.iloc[i]['date']
+
+        # Get the document's topic distribution
+        topic_distribution = lda_model.get_document_topics(doc_bow, minimum_probability=0)
+
+        # Converting to a dictionary 
+        topic_dict = dict(topic_distribution)
+
+        # Ensure all topics are present
+        topics_array = np.zeros(K)
+        for topic_id in range(K):
+            topics_array[topic_id] = topic_dict.get(topic_id, 0)
+
+        # Store the topic probabilities and date
+        doc_topics.append(topics_array)
+        doc_dates.append(doc_date)
+
+    # Create df
+    topic_columns = [f'Topic_{i}' for i in range(K)]
+    doc_topics_df = pd.DataFrame(doc_topics, columns=topic_columns)
+    doc_topics_df['date'] = doc_dates
+
+    # Ensure 'date' is datetime
+    doc_topics_df['date'] = pd.to_datetime(doc_topics_df['date'])
+
+    # Compute daily topic shares by averaging topic probabilities
+    daily_topic_shares = doc_topics_df.groupby('date')[topic_columns].mean().reset_index()
+
+    # Compute monthly topic shares
+    doc_topics_df['month'] = doc_topics_df['date'].dt.to_period('M').dt.to_timestamp()
+    monthly_topic_shares = doc_topics_df.groupby('month')[topic_columns].mean().reset_index()
+
+    return daily_topic_shares, monthly_topic_shares
+
+# ---------------------------
+# MAIN - Execution of pipeline
+# ---------------------------
+
+def main():
+    import logging
+    import os
+    import numpy as np
+    import pandas as pd
+    from gensim import corpora
+    from datetime import datetime
+
+    # ---------------------------
+    # Configure Logging
+    # ---------------------------
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s : %(levelname)s : %(message)s',
+        handlers=[
+            logging.StreamHandler()
+        ]
+    )
+
+    # ---------------------------
+    # Configuration
+    # ---------------------------
+    filepath = '/Users/Desktop/Articles  # <---- Replace with file path to the articles in JSON format
+
+    # Define the save directory
+    SAVE_DIR = '/Users/Desktop/Output    # <---- Replace with file path to saving
+
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    logging.info(f"Save directory set to: {SAVE_DIR}")
+
+    # Sample Run Configuration
+    USE_SAMPLE = False  # " On/Off button" - Set to False to run on the entire dataset
+    SAMPLE_SIZE = 10000  # Number of documents to use in sample run
+
+    # LDA Parameters
+    K = 20  # Number of topics
+    ALPHA = 0.01   
+    BETA = 0.001  
+    PASSES = 20
+    ITERATIONS = 100
+    RANDOM_STATE = 42
+
+    # Bigrams Parameters
+    BUILD_BIGRAMS = True
+    BIGRAM_MIN_COUNT = 5
+    BIGRAM_THRESHOLD = 100
+
+    # Number of Top Words per Topic
+    TOP_N_WORDS = 30  
+
+    # ---------------------------
+    # Load Data
+    # ---------------------------
+    try:
+        df = load_data(filepath)
+        logging.info(f"Loaded data from '{filepath}'. Total documents: {len(df)}.")
+    except Exception as e:
+        logging.error(f"Exiting due to data loading failure: {e}")
+        return
+
+    # ---------------------------
+    # Fetch Custom Stopwords and Common Names
+    # ---------------------------
+    try:
+        stopwords = get_custom_stopwords()
+        logging.info("Fetched custom stopwords.")
+    except Exception as e:
+        logging.error(f"Error fetching stopwords: {e}")
+        return
+
+    try:
+        common_names = fetch_common_names()
+        logging.info("Fetched common names.")
+    except Exception as e:
+        logging.error(f"Error fetching common names: {e}")
+        return
+
+    # ---------------------------
+    # Load SpaCy Model
+    # ---------------------------
+    try:
+        nlp = load_spacy_model()
+        logging.info("Loaded SpaCy model.")
+    except Exception as e:
+        logging.error(f"Exiting due to SpaCy model loading failure: {e}")
+        return
+
+    # ---------------------------
+    # Check for 'text' Column
+    # ---------------------------
+    if 'text' not in df.columns:
+        logging.error("The DataFrame does not contain a 'text' column.")
+        return
+
+    # ---------------------------
+    # Sample Documents for Evaluation
+    # ---------------------------
+
+    logging.info("Preparing documents for LDA evaluation...")
+    if USE_SAMPLE:
+        sample_size = SAMPLE_SIZE
+        logging.info(f"Running in sample mode: Sampling {sample_size} documents.")
+        if len(df) >= sample_size:
+            sampled_df = df.sample(n=sample_size, random_state=RANDOM_STATE)
+            logging.info(f"Sampled {sample_size} documents.")
+        else:
+            sampled_df = df
+            logging.warning(f"The dataset contains fewer than {sample_size} documents. Using all available documents ({len(df)}).")
+    else:
+        sample_size = len(df)
+        logging.info(f"Running on the entire dataset: {sample_size} documents.")
+        sampled_df = df
+
+    # Reset index to ensure alignment
+    sampled_df = sampled_df.reset_index(drop=True)
+
+    texts = sampled_df['text'].astype(str).tolist()
+
+    # ---------------------------
+    # Preprocess Sampled Texts
+    # ---------------------------
+
+    logging.info("Preprocessing sampled texts with bigrams...")
+    try:
+        processed_texts, bigram_model, bigram_phraser = preprocess_pipeline(
+            texts, stopwords, common_names, nlp,
+            build_bigrams=BUILD_BIGRAMS,
+            min_count=BIGRAM_MIN_COUNT,
+            threshold=BIGRAM_THRESHOLD
+        )
+        logging.info("Preprocessing completed.")
+    except Exception as e:
+        logging.error(f"Error during preprocessing: {e}")
+        return
+
+    # ---------------------------
+    # Build Dictionary and Corpus
+    # ---------------------------
+
+    logging.info("Building dictionary and corpus for processed texts...")
+    try:
+        dictionary, corpus, filtered_texts = build_dictionary_and_corpus(processed_texts)
+        logging.info(f"Dictionary and corpus built. Dictionary size: {len(dictionary)}. Corpus size: {len(corpus)}.")
+    except Exception as e:
+        logging.error(f"Error building dictionary and corpus: {e}")
+        return
+
+    # ---------------------------
+    # Train LDA Model
+    # ---------------------------
+    logging.info(f"Training LDA model with k={K}, alpha={ALPHA}, beta={BETA}...")
+    try:
+        lda_model, coherence_score = train_lda_model(
+            dictionary=dictionary,
+            corpus=corpus,
+            texts=filtered_texts,
+            k=K,
+            alpha=ALPHA,
+            beta=BETA,
+            passes=PASSES,
+            iterations=ITERATIONS,
+            random_state=RANDOM_STATE
+        )
+        logging.info(f"LDA model trained with coherence score: {coherence_score:.4f}.")
+    except Exception as e:
+        logging.error(f"Error training LDA model: {e}")
+        return
+
+    # ---------------------------
+    # Save LDA Model, Dictionary, and Corpus 
+    # ---------------------------
+
+    try:
+        lda_model_path = os.path.join(SAVE_DIR, 'lda_model.model')
+        lda_model.save(lda_model_path)
+        logging.info(f"LDA model saved as '{lda_model_path}'.")
+
+        dictionary_path = os.path.join(SAVE_DIR, 'dictionary.dict')
+        dictionary.save(dictionary_path)
+        logging.info(f"Dictionary saved as '{dictionary_path}'.")
+
+        corpus_path = os.path.join(SAVE_DIR, 'corpus.mm')
+        corpora.MmCorpus.serialize(corpus_path, corpus)
+        logging.info(f"Corpus saved as '{corpus_path}'.")
+    except Exception as e:
+        logging.error(f"Error saving model components: {e}")
+
+    # ---------------------------
+    # Compute Daily Topic Shares S_{t,k}
+    # ---------------------------
+
+    # Compute daily and monthly topic shares
+    daily_topic_shares, monthly_topic_shares = compute_daily_and_monthly_topic_shares(
+        lda_model, corpus, sampled_df, K
+    )
+
+    # Save daily topic shares as CSV
+    daily_topic_shares_csv_path = os.path.join(SAVE_DIR, 'daily_topic_shares.csv')
+    try:
+        daily_topic_shares.to_csv(daily_topic_shares_csv_path, index=False)
+        logging.info(f"Daily topic shares saved to '{daily_topic_shares_csv_path}'.")
+    except Exception as e:
+        logging.error(f"Error saving daily topic shares to CSV: {e}")
+
+    # Save monthly topic shares as CSV
+    monthly_topic_shares_csv_path = os.path.join(SAVE_DIR, 'monthly_topic_shares.csv')
+    try:
+        monthly_topic_shares.to_csv(monthly_topic_shares_csv_path, index=False)
+        logging.info(f"Monthly topic shares saved to '{monthly_topic_shares_csv_path}'.")
+    except Exception as e:
+        logging.error(f"Error saving monthly topic shares to CSV: {e}")
+
+    # ---------------------------
+    # Save Daily Topic Shares as JSON
+    # ---------------------------
+    daily_topic_shares_json_path = os.path.join(SAVE_DIR, 'daily_topic_shares.json')
+    try:
+        daily_topic_shares.to_json(
+            daily_topic_shares_json_path,
+            orient='records',
+            force_ascii=False,
+            indent=4
+        )
+        logging.info(f"Daily topic shares saved to '{daily_topic_shares_json_path}'.")
+    except Exception as e:
+        logging.error(f"Error saving daily topic shares to JSON: {e}")
+
+    # ---------------------------
+    # Save Monthly Topic Shares as JSON
+    # ---------------------------
+    monthly_topic_shares_json_path = os.path.join(SAVE_DIR, 'monthly_topic_shares.json')
+    try:
+        monthly_topic_shares.to_json(
+            monthly_topic_shares_json_path,
+            orient='records',
+            force_ascii=False,
+            indent=4
+        )
+        logging.info(f"Monthly topic shares saved to '{monthly_topic_shares_json_path}'.")
+    except Exception as e:
+        logging.error(f"Error saving monthly topic shares to JSON: {e}")
+
+    # ---------------------------
+    # Save Topics and Their Top Words
+    # ---------------------------
+    logging.info("Saving topics and their top words...")
+    try:
+        topics = lda_model.show_topics(formatted=False, num_words=TOP_N_WORDS)
+        topics_df = pd.DataFrame({
+            'Topic_ID': [topic[0] for topic in topics],
+            'Top_Words': [", ".join([word for word, prob in topic[1]]) for topic in topics]
+        })
+        topics_top_words_json_path = os.path.join(SAVE_DIR, 'topics_top_words.json')
+        topics_df.to_json(
+            topics_top_words_json_path,
+            orient='records',
+            force_ascii=False,
+            indent=4
+        )
+        logging.info(f"Topics and their top words saved as '{topics_top_words_json_path}'.")
+    except Exception as e:
+        logging.error(f"Error saving topics and top words: {e}")
+        return
+
+    # ---------------------------
+    # Evaluate and Save Per-Topic Coherence Scores
+    # ---------------------------
+    logging.info("Evaluating per-topic coherence scores...")
+    try:
+        coherence_df = evaluate_topic_coherence(lda_model, filtered_texts, dictionary, top_n=TOP_N_WORDS)
+        logging.info("Per-topic coherence scores evaluated.")
+    except Exception as e:
+        logging.error(f"Error evaluating topic coherence: {e}")
+        return
+
+    # ---------------------------
+    # Calculate and Integrate Prevalence
+    # ---------------------------
+    logging.info("Calculating topic prevalence...")
+    try:
+        # Determine the dominant topic for each document
+        doc_topic_distributions = [lda_model.get_document_topics(doc_bow, minimum_probability=0) for doc_bow in corpus]
+        dominant_topics = [max(doc_topics, key=lambda x: x[1])[0] for doc_topics in doc_topic_distributions]
+
+        # Calculate prevalence as the proportion of documents where each topic is dominant
+        prevalence_counts = pd.Series(dominant_topics).value_counts().sort_index()
+        total_documents = len(dominant_topics)
+        prevalence = (prevalence_counts / total_documents) * 100  # Percentage
+
+        # Create a df for prevalence
+        prevalence_df = prevalence.reset_index()
+        prevalence_df.columns = ['Topic_ID', 'Prevalence (%)']
+        prevalence_df['Topic_ID'] = prevalence_df['Topic_ID'].astype(int)
+
+        # Merge coherence scores with prevalence
+        final_topic_df = pd.merge(coherence_df, prevalence_df, on='Topic_ID', how='left')
+
+        # Rename columns for clarity
+        final_topic_df.rename(columns={
+            'Coherence Score (c_v)': 'Coherence',
+            'Top Words': 'Top_Words'
+        }, inplace=True)
+
+        # Reorder columns
+        final_topic_df = final_topic_df[['Topic_ID', 'Coherence', 'Prevalence (%)', 'Top_Words']]
+
+        # Sort the df by Prevalence in descending order
+        final_topic_df.sort_values(by='Prevalence (%)', ascending=False, inplace=True)
+
+        # Save the final table to JSON
+        final_topic_df_json_path = os.path.join(SAVE_DIR, 'topic_coherence_prevalence.json')
+        final_topic_df.to_json(
+            final_topic_df_json_path,
+            orient='records',
+            force_ascii=False,
+            indent=4
+        )
+        logging.info(f"Final topic coherence and prevalence scores saved as '{final_topic_df_json_path}'.")
+
+        # Print the final table
+        print("\n--- Topic Coherence and Prevalence ---\n")
+        print(final_topic_df.to_string(index=False))
+        print("\n-----------------------------------\n")
+    except Exception as e:
+        logging.error(f"Error calculating and integrating prevalence: {e}")
+        return
+
+    # ---------------------------
+    # Visualization: pyLDAvis
+    # ---------------------------
+    logging.info("Generating pyLDAvis visualization...")
+    try:
+        visualize_pyladavis(
+            lda_model,
+            corpus,
+            dictionary,
+            save_dir=SAVE_DIR
+        )
+        logging.info("pyLDAvis visualization generated.")
+    except Exception as e:
+        logging.error(f"Error generating pyLDAvis visualization: {e}")
+
+    # ---------------------------
+    # Visualization: Word Counts of Topic Keywords
+    # ---------------------------
+    logging.info("Generating Word Counts of Topic Keywords...")
+    try:
+        plot_top_coherence_word_counts_single(
+            lda_model,
+            filtered_texts,
+            dictionary,
+            top_n=12,
+            save_dir=SAVE_DIR
+        )
+        logging.info("Word Counts of Topic Keywords generated.")
+    except Exception as e:
+        logging.error(f"Error generating Word Counts of Topic Keywords: {e}")
+
+    # ---------------------------
+    # Visualization: Word Clouds for Topics
+    # ---------------------------
+    logging.info("Generating Word Clouds for Topics...")
+    try:
+        generate_word_clouds(
+            lda_model,
+            dictionary,
+            save_dir=SAVE_DIR,
+            top_n=120
+        )
+        logging.info("Word Clouds for Topics generated.")
+    except Exception as e:
+        logging.error(f"Error generating Word Clouds for Topics: {e}")
+        
+        
+
+    # ---------------------------
+    # Indicate Completion
+    # ---------------------------
+    logging.info("Script completed successfully.")
+    print("\n--- LDA Modeling and Daily Topic Shares Computation Completed Successfully ---\n")
+
+if __name__ == '__main__':
+    main()
