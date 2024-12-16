@@ -1,0 +1,684 @@
+# ---------------------------
+# Description and Purpose
+# ---------------------------
+#
+# Purpose:
+# This script assigns stocks with estimated beta coefficients into portfolios based on their sensitivity 
+# to climate risk factors. It loads beta estimates, merges them with stock returns, ranks stocks into 
+# decile and quintile portfolios, calculates portfolio returns, computes spread returns, merges with 
+# Fama-French factors, estimates alpha. Additionally, the script performs a periodic split at the signing 
+# of the Paris Agreement.
+#
+# Key Steps:
+# 1. Load Beta Estimates: Import beta estimation results from JSON files.
+# 2. Merge Beta with Returns: Combine beta estimates with cleaned stock return data.
+# 3. Assign Portfolios: Rank stocks into decile and quintile portfolios based on their beta coefficients.
+# 4. Calculate Portfolio Returns: Compute value-weighted returns for each portfolio.
+# 5. Compute Spread Returns: Determine the return spread between high and low-beta portfolios.
+# 6. Merge with Factor Returns: Combine spread returns with Fama-French factor data.
+# 7. Estimate Alpha: Perform regression analysis to estimate the alpha of the spread portfolio.
+# 8. Periodic Split Analysis: Split data analysis at Paris Agreement (Choose True/False in beginning of script to run either split or full period)
+
+
+import os
+import json
+import logging
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from tqdm import tqdm
+
+# ---------------------------
+# Configuration and Setup
+# ---------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("/Users/Desktop/Logs/portfolio_analysis.log"),  # <--- Need to change to correct path file
+        logging.StreamHandler()
+    ]
+)
+
+# Define Fama-French models and their corresponding factors
+factor_models = {
+    'FF3': ['Mkt-RF', 'FF3_SMB', 'FF3_HML'],
+    'FF4': ['Mkt-RF', 'FF4_SMB', 'FF4_HML', 'FF4_UMD'],
+    'FF5': ['Mkt-RF', 'FF5_SMB', 'FF5_HML', 'FF5_RMW', 'FF5_CMA']
+}
+
+# ---------------------------
+# Control Variable
+# ---------------------------
+
+split_period = True  # Set to 'True' to perform period split (Paris Agreement 2015-12-12), or 'False' to analyze the full period.
+
+# ---------------------------
+# 7. Load Beta Estimates and Prepare Data
+# ---------------------------
+
+# Define the directory where beta estimates are saved
+beta_directory = '/Users/Desktop/Beta_Estimates'  # <--- Need to change to correct path file where having the saved beta estimates
+
+# Check if the directory exists
+if not os.path.exists(beta_directory):
+    raise FileNotFoundError(f"The beta directory '{beta_directory}' does not exist.")
+
+# Get a list of all beta estimate files
+beta_files = [f for f in os.listdir(beta_directory) if f.endswith('.json')]
+
+# Check if there are any JSON files in the directory
+if not beta_files:
+    raise FileNotFoundError(f"No JSON files found in the beta directory, try open it in VSC and repeat '{beta_directory}'.")
+
+# Create a dictionary to store beta DataFrames for each topic and model
+beta_data = {}
+
+for file in tqdm(beta_files, desc="Loading Beta Estimates"):
+
+    # Extract topic number, type, and model from the filename
+    # Example filename: 'beta_Topic_12_transition_FF3.json'
+
+    parts = file.replace('.json', '').split('_')
+    if len(parts) != 5:
+        logging.warning(f"Unexpected filename format '{file}'. Expected 5 parts separated by '_'. Skipping this file.")
+        continue  
+    _, topic_str, topic_num, topic_type, ff_model = parts
+    key = f"Topic_{topic_num}_{topic_type}_{ff_model}"
+
+    # Load the JSON file
+
+    try:
+        with open(os.path.join(beta_directory, file), 'r') as f:
+            beta_estimates = json.load(f)
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding JSON for file '{file}': {e}. Skipping this file.")
+        continue  # Skip files with invalid JSON
+
+    # Convert list of dicts to df
+    beta_df = pd.DataFrame(beta_estimates)
+
+    # Ensure 'date' column is datetime
+    if 'date' not in beta_df.columns:
+        logging.error(f"'date' column missing in {key}. Skipping this file.")
+        continue
+    beta_df['date'] = pd.to_datetime(beta_df['date'], errors='coerce')
+
+    initial_len = len(beta_df)
+    beta_df = beta_df.dropna(subset=['date'])
+    if len(beta_df) < initial_len:
+        logging.warning(f"Dropped {initial_len - len(beta_df)} rows with invalid dates in {key}.")
+
+    required_columns = ['stock_ticker', 'date', 'beta_climate']
+    missing_required = [col for col in required_columns if col not in beta_df.columns]
+    if missing_required:
+        logging.error(f"Missing columns {missing_required} in {key}. Skipping this file.")
+        continue
+
+    beta_data[key] = beta_df
+
+logging.info("\nLoaded beta estimates for the following topics and models:")
+for key in beta_data.keys():
+    logging.info(key)
+
+# ---------------------------
+# 8. Merge Beta Estimates with Stock Returns
+# ---------------------------
+
+def merge_beta_with_returns(beta_df, market_data):
+    """
+    Merges beta estimates with the cleaned stock data on 'stock_ticker' and 'month'.
+
+    - beta_df: df containing 'stock_ticker', 'date', 'beta_climate'
+    - market_data: df containing stock data with 'stock_ticker' and 'date'
+
+    Returns:
+    - merged_df: DataFrame after merging
+    """
+    # Create 'month' columns as Period[M]
+    beta_df['month'] = beta_df['date'].dt.to_period('M')
+    market_data['month'] = market_data['date'].dt.to_period('M')
+
+    # Merge on 'stock_ticker' and 'month'
+    merged_df = pd.merge(
+        beta_df[['stock_ticker', 'month', 'beta_climate']],
+        market_data,
+        on=['stock_ticker', 'month'],
+        how='inner'
+    )
+
+    # Exclude stocks with NaN beta_climate
+    merged_df = merged_df.dropna(subset=['beta_climate'])
+
+    # Check if merged df is empty
+    if merged_df.empty:
+        logging.warning(f"The merged df is empty after excluding NaN betas.")
+    else:
+        logging.info(f"Merged df Shape: {merged_df.shape}")
+
+    return merged_df
+
+# ---------------------------
+# 9. Form Portfolios Based on Beta Rankings
+# ---------------------------
+
+def assign_portfolios(beta_returns_df, num_portfolios=10):
+    """
+    Assigns stocks to portfolios based on their beta rankings within each month.
+
+    - beta_returns_df: df containing 'stock_ticker', 'month', 'beta_climate'
+    - num_portfolios: int, number of portfolios to assign (10 for deciles, 5 for quintiles)
+
+    """
+    # Remove duplicates to have one beta per stock per month
+    beta_returns_df = beta_returns_df.drop_duplicates(subset=['stock_ticker', 'month'])
+
+    # Exclude stocks with NaN beta_climate
+    beta_returns_df = beta_returns_df.dropna(subset=['beta_climate'])
+
+    # Rank stocks within each month based on 'beta_climate'
+    beta_returns_df['beta_rank'] = beta_returns_df.groupby('month')['beta_climate'].rank(method='first', ascending=True)
+
+    # Calculate the number of stocks in each month
+    beta_returns_df['num_stocks'] = beta_returns_df.groupby('month')['beta_climate'].transform('count')
+
+    # Assign stocks to portfolios
+    beta_returns_df['portfolio'] = ((beta_returns_df['beta_rank'] - 1) / beta_returns_df['num_stocks'] * num_portfolios).astype(int) + 1
+
+    # Ensure portfolio numbers are within 1 to num_portfolios
+    beta_returns_df['portfolio'] = beta_returns_df['portfolio'].clip(upper=num_portfolios)
+
+    return beta_returns_df
+
+# ---------------------------
+# 10. Calculate Post-Ranking Value-Weighted Monthly Returns
+# ---------------------------
+
+def calculate_portfolio_returns(beta_returns_df):
+    """
+    Calculates value-weighted monthly returns for each portfolio.
+
+    - beta_returns_df: df containing 'stock_ticker', 'month', 'portfolio', 'daily_return', 'Market Equity'
+
+    Returns:
+    - portfolio_returns: df with 'month', 'portfolio', 'portfolio_return'
+    """
+    # Ensure 'Market Equity' is numeric
+    beta_returns_df['Market Equity'] = pd.to_numeric(beta_returns_df['Market Equity'], errors='coerce')
+
+    # Drop rows with missing Market Equity or daily_return
+    beta_returns_df = beta_returns_df.dropna(subset=['Market Equity', 'daily_return'])
+
+    # Calculate monthly returns for each stock
+    beta_returns_df['monthly_return'] = beta_returns_df.groupby(['stock_ticker', 'month'])['daily_return'].transform(lambda x: (1 + x).prod() - 1)
+
+    # Get the last 'Market Equity' value in the month for each stock
+    beta_returns_df['month_end_market_equity'] = beta_returns_df.groupby(['stock_ticker', 'month'])['Market Equity'].transform('last')
+
+    # Drop duplicates to keep one row per stock per month
+    beta_returns_df = beta_returns_df.drop_duplicates(subset=['stock_ticker', 'month'])
+
+    # Calculate value-weighted returns for each portfolio and month
+    portfolio_returns = beta_returns_df.groupby(['month', 'portfolio']).apply(
+        lambda x: np.average(x['monthly_return'], weights=x['month_end_market_equity'])
+    ).reset_index(name='portfolio_return')
+
+    return portfolio_returns
+
+# ---------------------------
+# 11. Compute Long-Short Spread Portfolio Returns
+# ---------------------------
+
+def calculate_spread_portfolio(portfolio_returns, num_portfolios):
+    """
+    Calculates the spread return between the highest and lowest portfolios.
+
+    - portfolio_returns: df with 'month', 'portfolio', 'portfolio_return'
+    - num_portfolios: int, number of portfolios (10 for deciles, 5 for quintiles)
+    - spread_portfolio_returns: df with 'month', 'spread_return'
+
+    """
+    # Pivot the df to have portfolios as columns
+    portfolio_pivot = portfolio_returns.pivot(index='month', columns='portfolio', values='portfolio_return')
+
+    # Rename columns for clarity
+    portfolio_pivot.columns = [f'Portfolio_{int(col)}' for col in portfolio_pivot.columns]
+
+    # Calculate the spread portfolio return (High - Low)
+    spread_portfolio_returns = portfolio_pivot.copy()
+    if f'Portfolio_{num_portfolios}' in spread_portfolio_returns.columns and 'Portfolio_1' in spread_portfolio_returns.columns:
+        spread_portfolio_returns['spread_return'] = spread_portfolio_returns[f'Portfolio_{num_portfolios}'] - spread_portfolio_returns['Portfolio_1']
+    else:
+        logging.error(f"Portfolio_{num_portfolios} or Portfolio_1 not found in portfolio_pivot.")
+        spread_portfolio_returns['spread_return'] = np.nan
+
+    # Reset index
+    spread_portfolio_returns = spread_portfolio_returns.reset_index()
+
+    return spread_portfolio_returns
+
+# ---------------------------
+# 12. Merge Spread Returns with Factor Returns
+# ---------------------------
+
+def merge_spread_with_factors(spread_returns, ff_monthly_corrected):
+    """
+    Merges spread portfolio returns with Fama-French factor returns on 'month'.
+
+    - spread_returns: df containing 'month' and 'spread_return'
+    - ff_monthly_corrected: df containing 'month' and Fama-French factor columns
+    - merged_spread: df after merging
+
+    """
+    merged_spread = pd.merge(spread_returns, ff_monthly_corrected, on='month', how='left')
+
+    # Check for missing values
+    if merged_spread.isnull().any().any():
+        logging.warning("Merged spread returns have missing values.")
+
+    return merged_spread
+
+# ---------------------------
+# Preparing Fama-French Monthly Data
+# ---------------------------
+
+# Ensure 'date' is in datetime format
+market_data['date'] = pd.to_datetime(market_data['date'])
+
+# Create 'month' column as Period[M]
+market_data['month'] = market_data['date'].dt.to_period('M')
+
+# List of Fama-French factor columns
+ff_factor_columns = ['Mkt-RF', 'FF3_SMB', 'FF3_HML', 'FF4_SMB', 'FF4_HML', 'FF4_UMD',
+                     'FF5_SMB', 'FF5_HML', 'FF5_RMW', 'FF5_CMA']
+
+# Aggregate factors to monthly frequency by taking the mean
+ff_monthly_corrected = market_data.groupby('month')[ff_factor_columns].mean().reset_index()
+
+# ---------------------------
+# 13. Estimate the Alpha of the Spread Portfolio
+# ---------------------------
+
+def estimate_alpha(spread_with_factors, model_factors):
+    """
+    Estimates the alpha of the spread portfolio using OLS regression with Newey-West HAC standard errors.
+
+    - spread_with_factors: df containing 'spread_return' and Fama-French factors
+    - model_factors: list of str, names of Fama-French factor columns to include in the regression
+    - model: fitted OLS regression model
+
+    """
+    # Drop rows with missing 'spread_return'
+    spread_with_factors = spread_with_factors.dropna(subset=['spread_return'])
+
+    # Define dependent and independent variables
+    y = spread_with_factors['spread_return']
+    X = spread_with_factors[model_factors]
+    X = sm.add_constant(X)  # Adds a constant term to the predictors
+
+    # Drop rows with any NaNs in predictors
+    X = X.dropna()
+    y = y.loc[X.index]
+
+    # Fit the OLS model with Newey-West HAC standard errors
+    if X.empty:
+        logging.error("No data available for regression after dropping NaNs.")
+        return None
+
+    model = sm.OLS(y, X).fit(cov_type='HAC', cov_kwds={'maxlags':6})
+
+    return model
+
+# ---------------------------
+# 14. Store the Results for Further Analysis
+# ---------------------------
+
+# Define output directories for results and portfolio returns
+results_output_dir = '/Users/Desktop/Results'                   # <--- Need to change to correct path file
+portfolio_output_dir = '/Users/Desktop/Portfolio_Returns_JSON'  # <--- Need to change to correct path file
+
+os.makedirs(results_output_dir, exist_ok=True)
+os.makedirs(portfolio_output_dir, exist_ok=True)  # New folder for JSON outputs
+
+# Define significant split events with their corresponding dates and descriptions
+split_events = [
+    {
+        'event_name': 'Paris Agreement',
+        'split_date': '2015-12-12',
+        'description': 'Signing of Paris Agreement'
+    }
+]
+
+# Function to split data based on a split date
+def split_data_on_date(data, split_date):
+    """
+    Splits the data into pre and post periods based on the split_date.
+
+    - data: df with a 'date' column
+    - split_date: date in 'YYYY-MM-DD' format to split the data
+    - pre_data: df with dates before split_date
+    - post_data: df with dates on or after split_date
+
+    """
+    split_datetime = pd.to_datetime(split_date)
+    pre_data = data[data['date'] < split_datetime]
+    post_data = data[data['date'] >= split_datetime]
+    return pre_data, post_data
+
+# ---------------------------
+# Main Processing Loop
+# ---------------------------
+
+# Iterate through each climate topic and Fama-French model
+for key in tqdm(beta_data.keys(), desc="Processing Climate Topics"):
+    logging.info(f"\nProcessing {key}")
+    beta_df = beta_data[key]
+
+    # Extract model name from the key
+    parts = key.split('_')
+    if len(parts) != 4:
+        logging.error(f"Unexpected key format '{key}'. Expected 4 parts separated by '_'. Skipping...")
+        continue
+    _, topic_num, topic_type, ff_model = parts
+    model_name = ff_model  # 'FF3', 'FF4', 'FF5'
+
+    if model_name not in factor_models:
+        logging.error(f"Model {model_name} not in factor_models. Skipping...")
+        continue
+
+    # Check if split_period is True to decide on splitting
+    if split_period:
+        for event in split_events:
+            event_name = event['event_name']
+            split_date = event['split_date']
+            description = event['description']
+
+            # Split the data into pre and post periods
+            pre_data, post_data = split_data_on_date(beta_df, split_date)
+
+            # Define labels for the periods
+            periods = [
+                {
+                    'period_label': f"{event_name}_Pre",
+                    'data': pre_data
+                },
+                {
+                    'period_label': f"{event_name}_Post",
+                    'data': post_data
+                }
+            ]
+
+            # Process each period separately
+            for period in periods:
+                period_label = period['period_label']
+                period_df = period['data']
+
+                logging.info(f"\nProcessing {period_label}: {description}")
+
+                # Merge beta estimates with stock returns using the cleaned data
+                merged_df = merge_beta_with_returns(period_df, market_data)
+
+                if merged_df.empty:
+                    logging.warning(f"No data available after merging for {key} during {period_label}. Skipping...")
+                    continue
+
+                # Assign Decile Portfolios
+                beta_returns_decile = assign_portfolios(merged_df.copy(), num_portfolios=10)
+
+                # Assign Quintile Portfolios
+                beta_returns_quintile = assign_portfolios(merged_df.copy(), num_portfolios=5)
+
+                # Calculate portfolio returns for Deciles
+                portfolio_returns_decile = calculate_portfolio_returns(beta_returns_decile)
+
+                # Calculate portfolio returns for Quintiles
+                portfolio_returns_quintile = calculate_portfolio_returns(beta_returns_quintile)
+
+                # Calculate spread returns for Deciles
+                spread_returns_decile = calculate_spread_portfolio(portfolio_returns_decile, num_portfolios=10)
+
+                # Calculate spread returns for Quintiles
+                spread_returns_quintile = calculate_spread_portfolio(portfolio_returns_quintile, num_portfolios=5)
+
+                # Save the portfolio returns to JSON for Deciles
+                portfolio_json_filename_decile = f"portfolio_returns_{key}_{period_label}_Decile.json"
+                try:
+                    # Create a copy to convert 'month' to string for JSON serialization
+                    spread_returns_decile_for_json = spread_returns_decile.copy()
+                    spread_returns_decile_for_json['month'] = spread_returns_decile_for_json['month'].astype(str)
+
+                    spread_returns_decile_for_json.to_json(
+                        os.path.join(portfolio_output_dir, portfolio_json_filename_decile),
+                        orient='records',
+                        date_format='iso'
+                    )
+                    logging.info(f"\nStored Decile portfolio returns for {key} during {period_label} in '{portfolio_json_filename_decile}'.")
+                except Exception as e:
+                    logging.error(f"Failed to save Decile portfolio returns for {key} during {period_label} to '{portfolio_json_filename_decile}': {e}")
+
+                # Save the portfolio returns to JSON for Quintiles
+                portfolio_json_filename_quintile = f"portfolio_returns_{key}_{period_label}_Quintile.json"
+                try:
+                    # Create a copy to convert 'month' to string for JSON serialization
+                    spread_returns_quintile_for_json = spread_returns_quintile.copy()
+                    spread_returns_quintile_for_json['month'] = spread_returns_quintile_for_json['month'].astype(str)
+
+                    spread_returns_quintile_for_json.to_json(
+                        os.path.join(portfolio_output_dir, portfolio_json_filename_quintile),
+                        orient='records',
+                        date_format='iso'
+                    )
+                    logging.info(f"\nStored Quintile portfolio returns for {key} during {period_label} in '{portfolio_json_filename_quintile}'.")
+                except Exception as e:
+                    logging.error(f"Failed to save Quintile portfolio returns for {key} during {period_label} to '{portfolio_json_filename_quintile}': {e}")
+
+                # Merge with factor returns using the monthly Fama-French factors from market_data
+                spread_with_factors_decile = merge_spread_with_factors(spread_returns_decile, ff_monthly_corrected)
+                spread_with_factors_quintile = merge_spread_with_factors(spread_returns_quintile, ff_monthly_corrected)
+
+                # Prepare to store results
+                results = []
+
+                # Use the model factors specific to the model used
+                model_factors = factor_models[model_name]
+
+                # Estimate Alpha for Decile Portfolios
+                logging.info(f"\nEstimating Alpha for {key} during {period_label} using {model_name} model (Decile Portfolios)")
+                try:
+                    alpha_model_decile = estimate_alpha(spread_with_factors_decile, model_factors)
+                    if alpha_model_decile:
+                        logging.info(alpha_model_decile.summary())
+                except Exception as e:
+                    logging.error(f"Alpha estimation failed for {key} during {period_label} (Decile): {e}")
+                    alpha_model_decile = None
+
+                if alpha_model_decile:
+                    # Store results
+                    results.append({
+                        'topic': key,
+                        'portfolio_type': 'Decile',
+                        'model': model_name,
+                        'period': period_label,
+                        'alpha': alpha_model_decile.params.get('const', np.nan),
+                        't_stat': alpha_model_decile.tvalues.get('const', np.nan),
+                        'p_value': alpha_model_decile.pvalues.get('const', np.nan),
+                        'adj_r_squared': alpha_model_decile.rsquared_adj
+                    })
+
+                # Estimate Alpha for Quintile Portfolios
+                logging.info(f"\nEstimating Alpha for {key} during {period_label} using {model_name} model (Quintile Portfolios)")
+                try:
+                    alpha_model_quintile = estimate_alpha(spread_with_factors_quintile, model_factors)
+                    if alpha_model_quintile:
+                        logging.info(alpha_model_quintile.summary())
+                except Exception as e:
+                    logging.error(f"Alpha estimation failed for {key} during {period_label} (Quintile): {e}")
+                    alpha_model_quintile = None
+
+                if alpha_model_quintile:
+
+                    results.append({
+                        'topic': key,
+                        'portfolio_type': 'Quintile',
+                        'model': model_name,
+                        'period': period_label,
+                        'alpha': alpha_model_quintile.params.get('const', np.nan),
+                        't_stat': alpha_model_quintile.tvalues.get('const', np.nan),
+                        'p_value': alpha_model_quintile.pvalues.get('const', np.nan),
+                        'adj_r_squared': alpha_model_quintile.rsquared_adj
+                    })
+
+                results_df = pd.DataFrame(results)
+
+                if results_df.empty:
+                    logging.warning(f"No results to save for {key} during {period_label}. Skipping saving.")
+                    continue
+
+                # Save to CSV 
+                output_filename = f"portfolio_analysis_results_{key}_{period_label}.csv"
+                try:
+                    results_df.to_csv(os.path.join(results_output_dir, output_filename), index=False)
+                    logging.info(f"\nStored analysis results for {key} during {period_label} in '{output_filename}'.")
+                except Exception as e:
+                    logging.error(f"Failed to save results for {key} during {period_label} to '{output_filename}': {e}")
+
+    else:
+        # If not splitting the period, process the full dataset as a single period
+        event = {
+            'event_name': 'Full_Period',
+            'split_date': None,
+            'description': 'Full analysis period without splitting'
+        }
+        period_label = 'Full_Period'
+        description = event['description']
+
+        logging.info(f"\nProcessing {period_label}: {description}")
+
+        merged_df = merge_beta_with_returns(beta_df, market_data)
+
+        if merged_df.empty:
+            logging.warning(f"No data available after merging for {key} during {period_label}. Skipping...")
+            continue
+
+        # Assign Decile Portfolios
+        beta_returns_decile = assign_portfolios(merged_df.copy(), num_portfolios=10)
+
+        # Assign Quintile Portfolios
+        beta_returns_quintile = assign_portfolios(merged_df.copy(), num_portfolios=5)
+
+        # Calculate portfolio returns for Deciles
+        portfolio_returns_decile = calculate_portfolio_returns(beta_returns_decile)
+
+        # Calculate portfolio returns for Quintiles
+        portfolio_returns_quintile = calculate_portfolio_returns(beta_returns_quintile)
+
+        # Calculate spread returns for Deciles
+        spread_returns_decile = calculate_spread_portfolio(portfolio_returns_decile, num_portfolios=10)
+
+        # Calculate spread returns for Quintiles
+        spread_returns_quintile = calculate_spread_portfolio(portfolio_returns_quintile, num_portfolios=5)
+
+        # Save the portfolio returns to JSON for Deciles
+        portfolio_json_filename_decile = f"portfolio_returns_{key}_{period_label}_Decile.json"
+        try:
+            # Create a copy to convert 'month' to string for JSON serialization
+            spread_returns_decile_for_json = spread_returns_decile.copy()
+            spread_returns_decile_for_json['month'] = spread_returns_decile_for_json['month'].astype(str)
+
+            spread_returns_decile_for_json.to_json(
+                os.path.join(portfolio_output_dir, portfolio_json_filename_decile),
+                orient='records',
+                date_format='iso'
+            )
+            logging.info(f"\nStored Decile portfolio returns for {key} during {period_label} in '{portfolio_json_filename_decile}'.")
+        except Exception as e:
+            logging.error(f"Failed to save Decile portfolio returns for {key} during {period_label} to '{portfolio_json_filename_decile}': {e}")
+
+        # Save the portfolio returns to JSON for Quintiles
+        portfolio_json_filename_quintile = f"portfolio_returns_{key}_{period_label}_Quintile.json"
+        try:
+            # Create a copy to convert 'month' to string for JSON serialization
+            spread_returns_quintile_for_json = spread_returns_quintile.copy()
+            spread_returns_quintile_for_json['month'] = spread_returns_quintile_for_json['month'].astype(str)
+
+            spread_returns_quintile_for_json.to_json(
+                os.path.join(portfolio_output_dir, portfolio_json_filename_quintile),
+                orient='records',
+                date_format='iso'
+            )
+            logging.info(f"\nStored Quintile portfolio returns for {key} during {period_label} in '{portfolio_json_filename_quintile}'.")
+        except Exception as e:
+            logging.error(f"Failed to save Quintile portfolio returns for {key} during {period_label} to '{portfolio_json_filename_quintile}': {e}")
+
+        # Merge with factor returns using the monthly Fama-French factors from market_data
+
+        spread_with_factors_decile = merge_spread_with_factors(spread_returns_decile, ff_monthly_corrected)
+        spread_with_factors_quintile = merge_spread_with_factors(spread_returns_quintile, ff_monthly_corrected)
+
+        # Prepare to store results
+        results = []
+
+        # Use the model factors specific to the model used
+        model_factors = factor_models[model_name]
+
+        # Estimate Alpha for Decile Portfolios
+        logging.info(f"\nEstimating Alpha for {key} during {period_label} using {model_name} model (Decile Portfolios)")
+        try:
+            alpha_model_decile = estimate_alpha(spread_with_factors_decile, model_factors)
+            if alpha_model_decile:
+                logging.info(alpha_model_decile.summary())
+        except Exception as e:
+            logging.error(f"Alpha estimation failed for {key} during {period_label} (Decile): {e}")
+            alpha_model_decile = None
+
+        if alpha_model_decile:
+            # Store results
+            results.append({
+                'topic': key,
+                'portfolio_type': 'Decile',
+                'model': model_name,
+                'period': period_label,
+                'alpha': alpha_model_decile.params.get('const', np.nan),
+                't_stat': alpha_model_decile.tvalues.get('const', np.nan),
+                'p_value': alpha_model_decile.pvalues.get('const', np.nan),
+                'adj_r_squared': alpha_model_decile.rsquared_adj
+            })
+
+        # Estimate Alpha for Quintile Portfolios
+        logging.info(f"\nEstimating Alpha for {key} during {period_label} using {model_name} model (Quintile Portfolios)")
+        try:
+            alpha_model_quintile = estimate_alpha(spread_with_factors_quintile, model_factors)
+            if alpha_model_quintile:
+                logging.info(alpha_model_quintile.summary())
+        except Exception as e:
+            logging.error(f"Alpha estimation failed for {key} during {period_label} (Quintile): {e}")
+            alpha_model_quintile = None
+
+        if alpha_model_quintile:
+            # Store results
+            results.append({
+                'topic': key,
+                'portfolio_type': 'Quintile',
+                'model': model_name,
+                'period': period_label,
+                'alpha': alpha_model_quintile.params.get('const', np.nan),
+                't_stat': alpha_model_quintile.tvalues.get('const', np.nan),
+                'p_value': alpha_model_quintile.pvalues.get('const', np.nan),
+                'adj_r_squared': alpha_model_quintile.rsquared_adj
+            })
+
+        # Save results to a DataFrame
+        results_df = pd.DataFrame(results)
+
+        if results_df.empty:
+            logging.warning(f"No results to save for {key} during {period_label}. Skipping saving.")
+            continue
+
+        # Save to CSV with clear naming
+        output_filename = f"portfolio_analysis_results_{key}_{period_label}.csv"
+        try:
+            results_df.to_csv(os.path.join(results_output_dir, output_filename), index=False)
+            logging.info(f"\nStored analysis results for {key} during {period_label} in '{output_filename}'.")
+        except Exception as e:
+            logging.error(f"Failed to save results for {key} during {period_label} to '{output_filename}': {e}")
