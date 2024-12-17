@@ -1,0 +1,347 @@
+#
+# ============================================
+# Fama-French Factor Models Calculation Script
+# ============================================
+#
+# This script computes the Fama-French Three-Factor (FF3),
+# Four-Factor (FF4), and Five-Factor (FF5) models.
+#
+#
+# Inputs:
+#
+#   - Bid_price: The price of the stock.
+#   - Market Equity: Market capitalization of the company.
+#   - Book-to-Market: The book-to-market ratio.
+#   - Profitability: Profitability metric for FF5's RMW factor.
+#   - Investment Rate: Investment rate for FF5's CMA factor.
+#   - Momentum: Representing stock momentum.
+#
+# Outputs:
+#
+# - JSON files for each factor model (FF3, FF4, FF5).
+#   - Factors include SMB (Small Minus Big), HML (High Minus Low),
+#     RMW (Robust Minus Weak), CMA (Conservative Minus Aggressive),
+#     and MOM (Up Minus Down) where applicable.
+#
+# Usage Instructions:
+#
+# 1. Setup:
+#    - Ensure you have Python installed on your system.
+#    - Install required libraries using pip:
+#
+# 2. Prepare Data:
+#    - Place your input JSON file in a known directory.
+#    - Update the file path in the script where indicated:
+#
+# 3. Configure Output Paths:
+#    - Specify where you want the output JSON files to be saved.
+#    - Replace the placeholder paths with your desired locations:
+#
+# Notes:
+# - Ensure that the input JSON file is correctly formatted and contains all necessary fields.
+# - The script uses a progress bar to indicate processing status for each frequency.
+# - Handle any errors or missing data as indicated by the script's output messages.
+#
+#
+# ============================================
+#
+
+
+
+import json
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from tqdm import tqdm  # For progress bar
+
+# ---------------------------
+# Step 1: Data Loading and Preparation
+# ---------------------------
+
+# Load the JSON data
+with open('/path/to/FAMA_status_with_Momentum.json', 'r') as f:  # <----- Need to add correct file path
+    data = json.load(f)
+
+# Convert the JSON data into a DataFrame
+records = []
+for key, value in data.items():
+    try:
+        # Extract stock ticker and date from the key
+        stock_ticker, date_str = eval(key)
+        date = pd.to_datetime(date_str)
+        # Include only active companies
+        if value.get('Market Status') == 'Active':
+            record = {
+                'stock_ticker': stock_ticker,
+                'date': date,
+                'BID_PRICE': value.get('BID PRICE'),
+                'Market Equity': value.get('Market Equity'),
+                'Book-to-Market': value.get('Book-to-Market'),
+                'Profitability': value.get('Profitability'),     
+                'Investment Rate': value.get('Investment Rate'), 
+                'Momentum': value.get('Momentum')                 
+            }
+            records.append(record)
+    except Exception as e:
+        print(f"Error parsing key {key}: {e}")
+
+df = pd.DataFrame(records)
+
+# Remove records with missing critical fields
+df.dropna(subset=['BID_PRICE', 'Market Equity', 'Book-to-Market', 'Momentum'], inplace=True)
+
+# Remove entries with zero Market Equity
+df = df[df['Market Equity'] > 0]
+
+# Sort by stock ticker and date
+df.sort_values(by=['stock_ticker', 'date'], inplace=True)
+
+# ---------------------------
+# Step 2: Calculating Daily Returns
+# ---------------------------
+
+def calculate_daily_returns(df):
+    """
+    Calculate daily returns for each stock.
+    """
+    df = df.sort_values(by=['stock_ticker', 'date'])
+    df['previous_bid_price'] = df.groupby('stock_ticker')['BID_PRICE'].shift(1)
+    df['daily_return'] = (df['BID_PRICE'] / df['previous_bid_price']) - 1
+    df['daily_return'] = df.groupby('stock_ticker')['daily_return'].transform(lambda x: x.fillna(0))
+    return df
+
+df = calculate_daily_returns(df)
+
+# ---------------------------
+# Step 3: Defining Frequencies
+# ---------------------------
+
+frequencies = {
+    'D': 'daily',
+    'W': 'weekly',
+    'M': 'monthly',
+    'Q': 'quarterly',
+    'A': 'annually'
+}
+
+# ---------------------------
+# Step 4: Processing Functions
+# ---------------------------
+
+def calculate_breakpoints(group, factors=['Size', 'BTM', 'Prof', 'Inv', 'Momentum']):
+    """
+    Calculate breakpoints for portfolio assignments.
+    """
+    breakpoints = {}
+    # Size at 80th percentile
+    breakpoints['Size'] = group['Market Equity'].quantile(0.8)
+    # Book-to-Market at 30th and 70th percentiles
+    breakpoints['BTM_Low'] = group['Book-to-Market'].quantile(0.3)
+    breakpoints['BTM_High'] = group['Book-to-Market'].quantile(0.7)
+    # Profitability at 30th and 70th percentiles
+    breakpoints['Prof_Low'] = group['Profitability'].quantile(0.3)
+    breakpoints['Prof_High'] = group['Profitability'].quantile(0.7)
+    # Investment Rate at 30th and 70th percentiles
+    breakpoints['Inv_Low'] = group['Investment Rate'].quantile(0.3)
+    breakpoints['Inv_High'] = group['Investment Rate'].quantile(0.7)
+    # Momentum at 10th and 90th percentiles
+    breakpoints['Momentum_Low'] = group['Momentum'].quantile(0.1)
+    breakpoints['Momentum_High'] = group['Momentum'].quantile(0.9)
+    return breakpoints
+
+def assign_portfolios(group, breakpoints):
+    """
+    Assign stocks to portfolios based on breakpoints.
+    """
+    # Size
+    group['Size_Portfolio'] = np.where(group['Market Equity'] <= breakpoints['Size'], 'Small', 'Big')
+    
+    # Book-to-Market
+    conditions = [
+        group['Book-to-Market'] <= breakpoints['BTM_Low'],
+        (group['Book-to-Market'] > breakpoints['BTM_Low']) & (group['Book-to-Market'] <= breakpoints['BTM_High']),
+        group['Book-to-Market'] > breakpoints['BTM_High']
+    ]
+    choices = ['Growth', 'Neutral', 'Value']
+    group['BTM_Portfolio'] = np.select(conditions, choices)
+    
+    # Combined HML Portfolio
+    group['HML_Portfolio'] = group['Size_Portfolio'].str[0] + group['BTM_Portfolio'].str[0]
+    
+    # Profitability
+    conditions = [
+        group['Profitability'] <= breakpoints['Prof_Low'],
+        group['Profitability'] >= breakpoints['Prof_High']
+    ]
+    choices = ['Weak', 'Robust']
+    group['Prof_Portfolio'] = np.select(conditions, choices, default='Neutral')
+    
+    # Combined RMW Portfolio
+    group['RMW_Portfolio_Label'] = group['Size_Portfolio'].str[0] + group['Prof_Portfolio'].str[0]
+    
+    # Investment Rate
+    conditions = [
+        group['Investment Rate'] <= breakpoints['Inv_Low'],
+        group['Investment Rate'] >= breakpoints['Inv_High']
+    ]
+    choices = ['Conservative', 'Aggressive']
+    group['Inv_Portfolio'] = np.select(conditions, choices, default='Neutral')
+    
+    # Combined CMA Portfolio
+    group['CMA_Portfolio_Label'] = group['Size_Portfolio'].str[0] + group['Inv_Portfolio'].str[0]
+    
+    # Momentum
+    conditions = [
+        group['Momentum'] <= breakpoints['Momentum_Low'],
+        group['Momentum'] >= breakpoints['Momentum_High']
+    ]
+    choices = ['L', 'W']
+    group['Momentum_Portfolio'] = np.select(conditions, choices, default='N')
+    
+    # Combined MOM Portfolio
+    group['MOM_Portfolio_Label'] = group['Size_Portfolio'].str[0] + group['Momentum_Portfolio']
+    
+    return group
+
+def calculate_portfolio_returns(group, return_column='period_return'):
+    """
+    Calculate weighted returns for each portfolio.
+    """
+    group['Market_Cap'] = group['Market Equity']
+    
+    def weighted_avg(x):
+        total_cap = x['Market_Cap'].sum()
+        return (x[return_column] * x['Market_Cap']).sum() / total_cap if total_cap > 0 else 0
+    
+    # HML
+    hml_returns = group.groupby('HML_Portfolio').apply(weighted_avg)
+    
+    # RMW
+    rmw_returns = group.groupby('RMW_Portfolio_Label').apply(weighted_avg)
+    
+    # CMA
+    cma_returns = group.groupby('CMA_Portfolio_Label').apply(weighted_avg)
+    
+    # MOM
+    mom_returns = group.groupby('MOM_Portfolio_Label').apply(weighted_avg)
+    
+    return hml_returns, rmw_returns, cma_returns, mom_returns
+
+def construct_factors(smb_bm, smb_op, smb_inv, hml, rmw, cma, mom):
+    """
+    Construct all FF factors.
+    """
+    factors = {}
+    
+    # SMB_FF5
+    factors['SMB_FF5'] = (smb_bm + smb_op + smb_inv) / 3
+    
+    # HML
+    factors['HML'] = hml
+    
+    # RMW
+    factors['RMW'] = rmw
+    
+    # CMA
+    factors['CMA'] = cma
+    
+    # MOM
+    factors['MOM'] = mom
+    
+    return factors
+
+# ---------------------------
+# Step 5: Main Processing Loop
+# ---------------------------
+
+def calculate_smb_sub_factors(smb_returns, label_suffix):
+    """
+    Calculate SMB sub-factors based on different criteria.
+    """
+    small = [p for p in smb_returns.index if p.startswith('S') and p.endswith(label_suffix)]
+    big = [p for p in smb_returns.index if p.startswith('B') and p.endswith(label_suffix)]
+    smb = (smb_returns.loc[small].mean() - smb_returns.loc[big].mean()) if small and big else 0
+    return smb
+
+for freq_code, freq_name in frequencies.items():
+    print(f'\nProcessing frequency: {freq_name.capitalize()}')
+    
+    # Calculate returns based on frequency
+    if freq_code == 'D':
+        df_freq = df.copy()
+        df_freq['period_return'] = df_freq['daily_return']
+    else:
+        df_freq = calculate_periodic_returns(df, freq_code)
+    
+    # Drop records with missing values after resampling
+    df_freq.dropna(subset=['BID_PRICE', 'Market Equity', 'Book-to-Market', 'Profitability', 'Investment Rate', 'Momentum', 'period_return'], inplace=True)
+    
+    factors_list = []
+    portfolios_list = []
+    
+    dates = sorted(df_freq['date'].unique())
+    total_dates = len(dates)
+    
+    for date in tqdm(dates, desc=f'Processing {freq_name.capitalize()} data', total=total_dates):
+        group = df_freq[df_freq['date'] == date].copy()
+        if group.empty:
+            continue
+        
+        # Calculate breakpoints
+        breakpoints = calculate_breakpoints(group)
+        
+        # Assign portfolios
+        group = assign_portfolios(group, breakpoints)
+        
+        # Determine return column
+        return_col = 'period_return' if freq_code != 'D' else 'daily_return'
+        
+        # Calculate portfolio returns
+        hml_r, rmw_r, cma_r, mom_r = calculate_portfolio_returns(group, return_column=return_col)
+        
+        # Calculate SMB sub-factors
+        smb_bm = calculate_smb_sub_factors(hml_r, 'V') - calculate_smb_sub_factors(hml_r, 'G')
+        smb_op = calculate_smb_sub_factors(rmw_r, 'R') - calculate_smb_sub_factors(rmw_r, 'W')
+        smb_inv = calculate_smb_sub_factors(cma_r, 'C') - calculate_smb_sub_factors(cma_r, 'A')
+        
+        # Construct factors
+        factors = construct_factors(smb_bm, smb_op, smb_inv, hml_r.mean() if not hml_r.empty else 0,
+                                    rmw_r.mean() if not rmw_r.empty else 0,
+                                    cma_r.mean() if not cma_r.empty else 0,
+                                    mom_r.mean() if not mom_r.empty else 0)
+        
+        factors['date'] = date.strftime('%Y-%m-%d')
+        factors_list.append(factors)
+        
+        # Save portfolio compositions
+        portfolios = {
+            'Size_Portfolios': group.groupby('Size_Portfolio')['stock_ticker'].apply(list).to_dict(),
+            'HML_Portfolios': group.groupby('HML_Portfolio')['stock_ticker'].apply(list).to_dict(),
+            'RMW_Portfolios': group.groupby('RMW_Portfolio_Label')['stock_ticker'].apply(list).to_dict(),
+            'CMA_Portfolios': group.groupby('CMA_Portfolio_Label')['stock_ticker'].apply(list).to_dict(),
+            'MOM_Portfolios': group.groupby('MOM_Portfolio_Label')['stock_ticker'].apply(list).to_dict()
+        }
+        
+        portfolios_entry = {
+            'date': date.strftime('%Y-%m-%d'),
+            'portfolios': portfolios
+        }
+        portfolios_list.append(portfolios_entry)
+    
+    # Create DataFrame from factors
+    factors_df = pd.DataFrame(factors_list)
+    factors_df.set_index('date', inplace=True)
+    
+    # Save factors to JSON
+    output_factors = f'/path/to/FF_factors_{freq_name}.json'  # <----- Need to add correct file path
+    with open(output_factors, 'w') as f_out:
+        json.dump(factors_list, f_out, indent=4)
+    
+    # Save portfolios to JSON
+    output_portfolios = f'/path/to/FF_portfolios_{freq_name}.json'  # <----- Need to add correct file path
+    with open(output_portfolios, 'w') as f_out:
+        json.dump(portfolios_list, f_out, indent=4)
+    
+    print(f'Completed processing for {freq_name.capitalize()}. Factors and portfolios saved.')
+
+print('\nAll frequencies processed.')
