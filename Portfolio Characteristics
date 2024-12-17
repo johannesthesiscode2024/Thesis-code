@@ -1,0 +1,760 @@
+"""
+# Portfolio Characteristics Analysis Script
+#
+# This script performs a regression-based analysis on stock portfolios. It:
+#
+# - Loads industry and ESG data.
+# - Loads beta estimates.
+# - Assigns stocks to portfolios based on their beta rankings.
+# - Calculates portfolio returns.
+# - Performs regressions using Fama-French models.
+# - Saves the results as JSON and CSV files for further analysis.
+
+"""
+
+# Import necessary libraries
+import os
+import json
+import logging
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+from tqdm import tqdm
+
+# Set up logging to capture information and errors with timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("portfolio_analysis.log"),
+        logging.StreamHandler()
+    ]
+)
+
+# Define Fama-French models and their related factors
+factor_models = {
+    'FF3': ['Mkt-RF', 'FF3_SMB', 'FF3_HML'],
+    'FF4': ['Mkt-RF', 'FF4_SMB', 'FF4_HML', 'FF4_UMD'],
+    'FF5': ['Mkt-RF', 'FF5_SMB', 'FF5_HML', 'FF5_RMW', 'FF5_CMA']
+}
+
+# File paths (update these paths to match your system)
+beta_directory = '/Users/Desktop/path_to_beta_directory'  # <--- Need to be changed for correct path
+results_output_dir = '/Users/Desktop/path_to_results_output'  # <--- Need to be changed for correct path
+industry_data_path = '/Users/Desktop/path_to_industry_data'  # <--- Need to be changed for correct path
+esg_data_path = '/Users/Desktop/path_to_esg_data'  # <--- Need to be changed for correct path
+
+# Output directories for portfolio returns and regression results
+portfolio_output_dir = os.path.join(results_output_dir, 'Portfolio_Returns_JSON')
+regression_output_dir = os.path.join(results_output_dir, 'Regression_Results')
+
+# Create the output directories if they don't exist
+os.makedirs(results_output_dir, exist_ok=True)
+os.makedirs(portfolio_output_dir, exist_ok=True)
+os.makedirs(regression_output_dir, exist_ok=True)
+
+# -------------------
+# Load Industry Data
+# -------------------
+logging.info("Loading Industry Data...")
+try:
+    with open(industry_data_path, 'r') as f:
+        industry_data = json.load(f)
+except Exception as e:
+    logging.error(f"Failed to load Industry data from '{industry_data_path}': {e}")
+    raise
+
+# Convert the industry data to a DataFrame
+industry_df = pd.DataFrame(industry_data)
+
+# Rename columns for consistency
+industry_df.rename(columns={
+    'Company_id': 'stock_ticker',
+    'Category': 'Industry',
+    'Category_specific': 'Industry_Specific'
+}, inplace=True)
+
+# Make sure the stock ticker is a string
+industry_df['stock_ticker'] = industry_df['stock_ticker'].astype(str)
+
+logging.info(f"Industry Data Loaded: {industry_df.shape[0]} records.")
+
+# -------------------
+# Load ESG Data
+# -------------------
+logging.info("Loading ESG Data...")
+try:
+    with open(esg_data_path, 'r') as f:
+        esg_data = json.load(f)
+except Exception as e:
+    logging.error(f"Failed to load ESG data from '{esg_data_path}': {e}")
+    raise
+
+# List to store ESG records
+esg_records = []
+
+# ESG numeric columns
+numeric_columns = [
+    'CO2 Equivalents Emission Direct',
+    'CO2 Equivalents Emission Indirect',
+    'CO2 Equivalents Emission Total',
+    'Total CO2 Equivalent Emissions To Revenues USD in millions',
+    'Environment Pillar Score',
+    'ESG Score',
+    'RESEARCH & DEVELOPMENT',
+    'RETURN ON ASSETS',
+    'RESEARCH & DEVELOPMENT/SALES',
+    # Add other columns if needed
+]
+
+logging.info("Processing ESG Data...")
+# Process each company in ESG data
+for company in tqdm(esg_data, desc="Processing ESG Companies"):
+    stock_ticker = str(company.get('Company_id', ''))
+    data = company.get('Data', {})
+    
+    if not isinstance(data, dict):
+        logging.warning(f"Data for {stock_ticker} is not a dictionary. Skipping...")
+        continue
+    
+    for date_str, metrics in data.items():
+        try:
+            record = {
+                'stock_ticker': stock_ticker,
+                'date': pd.to_datetime(date_str)
+            }
+            # Add metrics to the record
+            for key, value in metrics.items():
+                if key in numeric_columns:
+                    record[key] = pd.to_numeric(value, errors='coerce')
+                else:
+                    record[key] = value
+            esg_records.append(record)
+        except Exception as e:
+            logging.warning(f"Failed to process ESG data for {stock_ticker} on {date_str}: {e}")
+
+# Convert ESG records to a DataFrame
+esg_df = pd.DataFrame(esg_records)
+
+# Ensure correct data types
+esg_df['stock_ticker'] = esg_df['stock_ticker'].astype(str)
+esg_df['date'] = pd.to_datetime(esg_df['date'], errors='coerce')
+
+logging.info(f"ESG Data Loaded: {esg_df.shape[0]} records.")
+logging.info(f"Sample ESG Data:\n{esg_df.head()}")
+
+# ------------------------------------
+# Load Beta Estimates and Perform Analysis
+# ------------------------------------
+
+# Lists to collect regression results and portfolio characteristics
+master_regression_results = []
+master_portfolio_characteristics = []
+
+logging.info("Loading Cleaned Data...")
+try:
+    market_data = pd.read_csv(
+        '/Users/Desktop/path_to_cleaned_data/cleaned_data.csv',  # <--- Need to be changed for correct path
+        parse_dates=['date']
+    )
+except Exception as e:
+    logging.error(f"Failed to load cleaned data from '/Users/Desktop/path_to_cleaned_data/cleaned_data.csv': {e}")
+    raise
+
+# Ensure correct data types
+market_data['stock_ticker'] = market_data['stock_ticker'].astype(str)
+market_data['date'] = pd.to_datetime(market_data['date'], errors='coerce')
+
+logging.info(f"Cleaned Data Loaded: {market_data.shape[0]} records.")
+logging.info(f"Sample Cleaned Data:\n{market_data.head()}")
+
+# -------------------
+# Load Beta Estimates
+# -------------------
+logging.info("Loading Beta Estimates...")
+
+# Check if the beta directory exists
+if not os.path.exists(beta_directory):
+    logging.error(f"The beta directory '{beta_directory}' does not exist.")
+    raise FileNotFoundError(f"The beta directory '{beta_directory}' does not exist.")
+
+# List all JSON files in the beta directory
+beta_files = [f for f in os.listdir(beta_directory) if f.endswith('.json')]
+
+# Check if there are any JSON files
+if not beta_files:
+    logging.error(f"No JSON files found in the beta directory '{beta_directory}'.")
+    raise FileNotFoundError(f"No JSON files found in the beta directory '{beta_directory}'.")
+
+# Dictionary to store beta DataFrames
+beta_data = {}
+
+for file in tqdm(beta_files, desc="Loading Beta Files"):
+    # Example filename: 'beta_Topic_12_physical_FF3.json'
+    parts = file.replace('.json', '').split('_')
+    if len(parts) != 5:
+        logging.warning(f"Unexpected filename format '{file}'. Expected 5 parts separated by '_'. Skipping this file.")
+        continue
+    _, topic_str, topic_num, topic_type, ff_model = parts
+    key = f"Topic_{topic_num}_{topic_type}_{ff_model}"
+
+    # Only include Topic 12
+    if topic_num != '12':
+        logging.info(f"Skipping {key} as it is not Topic 12.")
+        continue
+
+    # Load the JSON file
+    try:
+        with open(os.path.join(beta_directory, file), 'r') as f:
+            beta_estimates = json.load(f)
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding JSON for file '{file}': {e}. Skipping this file.")
+        continue
+
+    # Convert to DataFrame
+    beta_df = pd.DataFrame(beta_estimates)
+
+    # Ensure 'date' column is datetime
+    if 'date' not in beta_df.columns:
+        logging.error(f"'date' column missing in {key}. Skipping this file.")
+        continue
+    beta_df['date'] = pd.to_datetime(beta_df['date'], errors='coerce')
+
+    # Remove rows with invalid dates
+    initial_len = len(beta_df)
+    beta_df = beta_df.dropna(subset=['date'])
+    if len(beta_df) < initial_len:
+        logging.warning(f"Dropped {initial_len - len(beta_df)} rows with invalid dates in {key}.")
+
+    # Check for required columns
+    required_columns = ['stock_ticker', 'date', 'beta_climate']
+    missing_required = [col for col in required_columns if col not in beta_df.columns]
+    if missing_required:
+        logging.error(f"Missing columns {missing_required} in {key}. Skipping this file.")
+        continue
+
+    # Store the DataFrame
+    beta_data[key] = beta_df
+
+logging.info("\nLoaded beta estimates for the following topics and models:")
+for key in beta_data.keys():
+    logging.info(key)
+
+# -------------------
+# Define Helper Functions
+# -------------------
+
+def merge_all_data(beta_df, cleaned_df, industry_df, esg_df):
+    """
+    Combines beta estimates with stock returns, industry data, and ESG data.
+
+    - beta_df: DataFrame with 'stock_ticker', 'date', 'beta_climate'
+    - cleaned_df: DataFrame with stock data including 'stock_ticker', 'date', 'daily_return', 'Market Equity'
+    - industry_df: DataFrame with 'stock_ticker', 'Industry', 'Industry_Specific'
+    - esg_df: DataFrame with 'stock_ticker', 'date', ESG metrics
+    - merged_df: Combined DataFrame
+
+    """
+    # Create 'month' columns
+    beta_df['month'] = beta_df['date'].dt.to_period('M')
+    cleaned_df['month'] = cleaned_df['date'].dt.to_period('M')
+    esg_df['month'] = esg_df['date'].dt.to_period('M')
+
+    # Merge beta estimates with cleaned stock data
+    merged_df = pd.merge(
+        beta_df[['stock_ticker', 'month', 'beta_climate']],
+        cleaned_df,
+        on=['stock_ticker', 'month'],
+        how='inner'
+    )
+
+    # Remove stocks with missing beta_climate
+    merged_df = merged_df.dropna(subset=['beta_climate'])
+
+    # Merge with industry data
+    merged_df = pd.merge(
+        merged_df,
+        industry_df[['stock_ticker', 'Industry', 'Industry_Specific']],
+        on='stock_ticker',
+        how='left'
+    )
+
+    # Merge with ESG data
+    merged_df = pd.merge(
+        merged_df,
+        esg_df,
+        on=['stock_ticker', 'month'],
+        how='left'
+    )
+
+    # Check for missing Industry or ESG scores
+    missing_industry = merged_df['Industry'].isna().sum()
+    if missing_industry > 0:
+        logging.warning(f"{missing_industry} records are missing Industry information.")
+
+    esg_score_columns = ['ESG Score', 'Environment Pillar Score']
+    missing_esg = merged_df[esg_score_columns].isna().sum().sum()
+    if missing_esg > 0:
+        logging.warning(f"{missing_esg} ESG score entries are missing.")
+
+    # Check if merged DataFrame is empty
+    if merged_df.empty:
+        logging.warning("The merged DataFrame is empty after merging all data.")
+    else:
+        logging.info(f"Final Merged DataFrame Shape: {merged_df.shape}")
+
+    return merged_df
+
+def assign_portfolios(beta_returns_df, num_portfolios=5):
+    """
+    Assigns stocks to portfolios based on their beta rankings each month.
+
+    - beta_returns_df: DataFrame with 'stock_ticker', 'month', 'beta_climate', 'Industry', ESG metrics
+    - num_portfolios: Number of portfolios to create (default is 5)
+    - beta_returns_df: DataFrame with an added 'portfolio' column
+
+    """
+    # Remove duplicate entries
+    beta_returns_df = beta_returns_df.drop_duplicates(subset=['stock_ticker', 'month'])
+
+    # Remove stocks with missing beta_climate
+    beta_returns_df = beta_returns_df.dropna(subset=['beta_climate'])
+
+    # Rank stocks within each month based on beta_climate
+    beta_returns_df['beta_rank'] = beta_returns_df.groupby('month')['beta_climate'].rank(method='first', ascending=True)
+
+    # Count the number of stocks each month
+    beta_returns_df['num_stocks'] = beta_returns_df.groupby('month')['beta_climate'].transform('count')
+
+    # Assign stocks to portfolios
+    beta_returns_df['portfolio'] = ((beta_returns_df['beta_rank'] - 1) / beta_returns_df['num_stocks'] * num_portfolios).astype(int) + 1
+
+    # Ensure portfolio numbers are within the correct range
+    beta_returns_df['portfolio'] = beta_returns_df['portfolio'].clip(upper=num_portfolios)
+
+    return beta_returns_df
+
+def calculate_portfolio_returns(beta_returns_df):
+    """
+    Computes value-weighted monthly returns for each portfolio.
+
+    - beta_returns_df: DataFrame with 'stock_ticker', 'month', 'portfolio', 'daily_return', 'Market Equity'
+    - portfolio_returns: DataFrame with 'month', 'portfolio', 'portfolio_return'
+
+    """
+    # Ensure Market Equity is numeric
+    beta_returns_df['Market Equity'] = pd.to_numeric(beta_returns_df['Market Equity'], errors='coerce')
+
+    # Remove rows with missing Market Equity or daily_return
+    beta_returns_df = beta_returns_df.dropna(subset=['Market Equity', 'daily_return'])
+
+    # Calculate monthly returns for each stock
+    beta_returns_df['monthly_return'] = beta_returns_df.groupby(['stock_ticker', 'month'])['daily_return'].transform(lambda x: (1 + x).prod() - 1)
+
+    # Get the last Market Equity value for each stock in the month
+    beta_returns_df['month_end_market_equity'] = beta_returns_df.groupby(['stock_ticker', 'month'])['Market Equity'].transform('last')
+
+    # Remove duplicate entries
+    beta_returns_df = beta_returns_df.drop_duplicates(subset=['stock_ticker', 'month'])
+
+    # Calculate value-weighted returns for each portfolio and month
+    portfolio_returns = beta_returns_df.groupby(['month', 'portfolio']).apply(
+        lambda x: np.average(x['monthly_return'], weights=x['month_end_market_equity'])
+    ).reset_index(name='portfolio_return')
+
+    return portfolio_returns
+
+def calculate_spread_portfolio(portfolio_returns, num_portfolios):
+    """
+    Computes the spread return between the highest and lowest portfolios.
+
+    - portfolio_returns: DataFrame with 'month', 'portfolio', 'portfolio_return'
+    - num_portfolios: Number of portfolios (default is 5)
+    - spread_portfolio_returns: DataFrame with 'month', 'spread_return'
+
+    """
+    # Pivot the DataFrame to have portfolios as columns
+    portfolio_pivot = portfolio_returns.pivot(index='month', columns='portfolio', values='portfolio_return')
+
+    # Rename columns for clarity
+    portfolio_pivot.columns = [f'Portfolio_{int(col)}' for col in portfolio_pivot.columns]
+
+    # Calculate the spread return (High - Low)
+    spread_portfolio_returns = portfolio_pivot.copy()
+    if f'Portfolio_{num_portfolios}' in spread_portfolio_returns.columns and 'Portfolio_1' in spread_portfolio_returns.columns:
+        spread_portfolio_returns['spread_return'] = spread_portfolio_returns[f'Portfolio_{num_portfolios}'] - spread_portfolio_returns['Portfolio_1']
+    else:
+        logging.error(f"Portfolio_{num_portfolios} or Portfolio_1 not found in portfolio_pivot.")
+        spread_portfolio_returns['spread_return'] = np.nan
+
+    # Reset index to turn 'month' back into a column
+    spread_portfolio_returns = spread_portfolio_returns.reset_index()
+
+    return spread_portfolio_returns
+
+def calculate_portfolio_characteristics(beta_returns_quintile):
+    """
+    Calculates average characteristics for each portfolio.
+
+    - beta_returns_quintile: DataFrame with 'portfolio' and various characteristics
+    - characteristics_df: DataFrame with average characteristics per portfolio
+
+    """
+    # Columns to average
+    average_columns = [
+        'beta_climate',
+        'ESG Score',
+        'Environment Pillar Score',
+        'RESEARCH & DEVELOPMENT',
+        'RETURN ON ASSETS',
+        'RESEARCH & DEVELOPMENT/SALES',
+        'Market Equity',  
+        'CO2 Equivalents Emission Direct',
+        'CO2 Equivalents Emission Indirect',
+        'CO2 Equivalents Emission Total',
+        'Total CO2 Equivalent Emissions To Revenues USD in millions',
+    ]
+
+    # Check which columns are available
+    available_columns = [col for col in average_columns if col in beta_returns_quintile.columns]
+    missing_columns = set(average_columns) - set(available_columns)
+    if missing_columns:
+        logging.warning(
+            f"The following columns are missing and will be skipped for averaging: {missing_columns}"
+        )
+
+    # Calculate mean for numerical characteristics
+    try:
+        characteristics_df = beta_returns_quintile.groupby('portfolio')[available_columns].mean().reset_index()
+    except Exception as e:
+        logging.error(f"Error calculating mean characteristics: {e}")
+        return pd.DataFrame()  # Return empty DataFrame on failure
+
+    # Calculate Industry Composition Percentage
+    try:
+        industry_composition = beta_returns_quintile.groupby(['portfolio', 'Industry']).size().reset_index(name='count')
+        total_per_portfolio = beta_returns_quintile.groupby('portfolio').size().reset_index(name='total_count')
+        industry_composition = pd.merge(industry_composition, total_per_portfolio, on='portfolio')
+        industry_composition['industry_percentage'] = (industry_composition['count'] / industry_composition['total_count']) * 100
+
+        # Pivot to have industries as separate columns
+        industry_pivot = industry_composition.pivot(index='portfolio', columns='Industry', values='industry_percentage').fillna(0).reset_index()
+
+        # Merge with characteristics_df
+        characteristics_df = pd.merge(characteristics_df, industry_pivot, on='portfolio', how='left')
+    except Exception as e:
+        logging.error(f"Error calculating industry composition: {e}")
+
+    return characteristics_df
+
+def regress_portfolio(portfolio_returns, factors, model_name, portfolio_label):
+    """
+    Runs a regression of portfolio returns on Fama-French factors and extracts results.
+
+    - portfolio_returns: Series of portfolio returns
+    - factors: DataFrame of factor returns
+    - model_name: Name of the FF model (e.g., 'FF3', 'FF4', 'FF5')
+    - portfolio_label: Label of the portfolio (e.g., 'Portfolio_1')
+    - dict: Contains model, portfolio, alpha, t-statistic, p-value, and adjusted R-squared
+
+    """
+    # Combine the data
+    data = pd.concat([portfolio_returns, factors], axis=1).dropna()
+
+    # Define dependent and independent variables
+    y = data.iloc[:, 0]  # Portfolio returns
+    X = data.iloc[:, 1:] # Fama French factors
+
+    # Add a constant term for the intercept
+    X = sm.add_constant(X)
+
+    # Fit the OLS regression with Newey-West HAC standard errors
+    try:
+        model = sm.OLS(y, X).fit(cov_type='HAC', cov_kwds={'maxlags':6})
+    except Exception as e:
+        logging.error(f"Regression failed for {portfolio_label} with model {model_name}: {e}")
+        return None
+
+    # Extract regression results
+    alpha = model.params.get('const', np.nan)
+    t_stat = model.tvalues.get('const', np.nan)
+    p_value = model.pvalues.get('const', np.nan)
+    adj_r_squared = model.rsquared_adj
+
+    return {
+        'Model': model_name,
+        'Portfolio': portfolio_label,
+        'Alpha': alpha,
+        'T-Statistic': t_stat,
+        'P-Value': p_value,
+        'Adjusted_R_Squared': adj_r_squared
+    }
+
+# Define significant split events
+split_events = [
+    {
+        'event_name': 'Paris Agreement',
+        'split_date': '2015-12-12',
+        'description': 'Enactment of Paris Agreement'
+    }
+]
+
+def split_data_on_date(data, split_date):
+    """
+    Splits the data into before and after a specific date.
+
+    - data: DataFrame with a 'date' column
+    - split_date: Date string in 'YYYY-MM-DD' format
+    - pre_data: DataFrame with dates before the split_date
+    - post_data: DataFrame with dates on or after the split_date
+
+    """
+    split_datetime = pd.to_datetime(split_date)
+    pre_data = data[data['date'] < split_datetime]
+    post_data = data[data['date'] >= split_datetime]
+    return pre_data, post_data
+
+# ---------------------------
+# Main Processing Loop
+# ---------------------------
+
+# Loop through each climate topic and Fama-French model
+for key in tqdm(beta_data.keys(), desc="Processing Climate Topics"):
+    logging.info(f"\nProcessing {key}")
+    beta_df = beta_data[key]
+
+    # Extract model name
+    parts = key.split('_')
+    if len(parts) != 4:
+        logging.error(f"Unexpected key format '{key}'. Expected 4 parts separated by '_'. Skipping...")
+        continue
+    _, topic_num, topic_type, ff_model = parts
+    model_name = ff_model  # e.g., 'FF3', 'FF4', 'FF5'
+
+    if model_name not in factor_models:
+        logging.error(f"Model {model_name} not in factor_models. Skipping...")
+        continue
+
+    # Loop through each split event
+    for event in split_events:
+        event_name = event['event_name']
+        split_date = event['split_date']
+        description = event['description']
+
+        # Split the data into before and after the event
+        pre_data, post_data = split_data_on_date(beta_df, split_date)
+
+        # Define the periods
+        periods = [
+            {
+                'period_label': f"{event_name}_Pre",
+                'data': pre_data
+            },
+            {
+                'period_label': f"{event_name}_Post",
+                'data': post_data
+            }
+        ]
+
+        # Process each period
+        for period in periods:
+            period_label = period['period_label']
+            period_df = period['data']
+
+            logging.info(f"\nProcessing {period_label}: {description}")
+
+            # Merge all relevant data
+            merged_df = merge_all_data(period_df, market_data, industry_df, esg_df)
+
+            if merged_df.empty:
+                logging.warning(f"No data available after merging for {key} during {period_label}. Skipping...")
+                continue
+
+            # Assign stocks to portfolios
+            beta_returns_quintile = assign_portfolios(merged_df.copy(), num_portfolios=5)
+
+            # Calculate average characteristics for each portfolio
+            characteristics_df = calculate_portfolio_characteristics(beta_returns_quintile)
+
+            # Log the average characteristics
+            logging.info(f"Average characteristics for each portfolio during {period_label}:")
+            logging.info(characteristics_df.to_string(index=False, float_format='%.4f'))
+
+            # Save the characteristics to a JSON file
+            characteristics_json_filename = f"portfolio_characteristics_{key}_{period_label}.json"
+            try:
+                characteristics_df.to_json(
+                    os.path.join(results_output_dir, characteristics_json_filename),
+                    orient='records',
+                    date_format='iso',
+                    indent=4  # For readability
+                )
+                logging.info(f"Saved portfolio characteristics for {key} during {period_label} in '{characteristics_json_filename}'.")
+            except Exception as e:
+                logging.error(f"Failed to save portfolio characteristics for {key} during {period_label} to '{characteristics_json_filename}': {e}")
+
+            # Add to the master list
+            characteristics_df['key'] = key
+            characteristics_df['period'] = period_label
+            master_portfolio_characteristics.append(characteristics_df)
+
+            # Calculate portfolio returns
+            portfolio_returns_quintile = calculate_portfolio_returns(beta_returns_quintile)
+
+            # Calculate spread returns
+            spread_returns_quintile = calculate_spread_portfolio(portfolio_returns_quintile, num_portfolios=5)
+
+            # Save the portfolio returns to a JSON file
+            portfolio_json_filename = f"portfolio_returns_{key}_{period_label}.json"
+            try:
+                # Convert 'month' from Period to string for JSON
+                spread_returns_quintile['month'] = spread_returns_quintile['month'].astype(str)
+                spread_returns_quintile.to_json(
+                    os.path.join(portfolio_output_dir, portfolio_json_filename),
+                    orient='records',
+                    date_format='iso',
+                    indent=4  # For readability
+                )
+                logging.info(f"\nSaved portfolio returns for {key} during {period_label} in '{portfolio_json_filename}'.")
+            except Exception as e:
+                logging.error(f"Failed to save portfolio returns for {key} during {period_label} to '{portfolio_json_filename}': {e}")
+
+            # -------------------------------
+            # Perform Regression Analysis
+            # -------------------------------
+            logging.info(f"Performing regression analysis for {period_label}.")
+
+            # Define portfolio labels
+            quintile_portfolios = [f'Portfolio_{i}' for i in range(1, 6)]
+            quintile_returns = portfolio_returns_quintile[portfolio_returns_quintile['portfolio'].isin(range(1, 6))].copy()
+            quintile_returns = quintile_returns.rename(columns={'portfolio': 'portfolio_number'})
+
+            quintile_pivot = quintile_returns.pivot(index='month', columns='portfolio_number', values='portfolio_return')
+            quintile_pivot.columns = [f'Portfolio_{int(col)}' for col in quintile_pivot.columns]
+
+            # Merge with Fama-French factors
+            ff_factors_current = merged_df.groupby('month')[factor_models[model_name]].mean().reset_index()
+
+            # Combine portfolio returns with factor returns
+            merged_regression = pd.merge(quintile_pivot.reset_index(), ff_factors_current, on='month', how='left')
+
+            # Remove rows with missing values
+            merged_regression = merged_regression.dropna()
+
+            # List to store regression results
+            regression_results = []
+
+            # Loop through each quintile portfolio
+            for quintile in tqdm(quintile_portfolios, desc=f"Regressing Portfolios for {period_label}", leave=False):
+                if quintile not in merged_regression.columns:
+                    logging.warning(f"{quintile} not found in merged_regression. Skipping...")
+                    continue
+
+                # Get portfolio returns
+                portfolio_returns_series = merged_regression[quintile]
+
+                # Get factor returns
+                factor_returns = merged_regression[factor_models[model_name]]
+
+                # Run regression
+                regression_result = regress_portfolio(portfolio_returns_series, factor_returns, model_name, quintile)
+                if regression_result:
+                    regression_results.append(regression_result)
+
+            # Convert regression results to DataFrame
+            regression_df = pd.DataFrame(regression_results)
+
+            if regression_df.empty:
+                logging.warning(f"No regression results to save for {key} during {period_label}.")
+                continue
+
+            # Save regression results to a JSON file
+            regression_json_filename = f"regression_results_{key}_{period_label}.json"
+            try:
+                regression_df.to_json(
+                    os.path.join(regression_output_dir, regression_json_filename),
+                    orient='records',
+                    date_format='iso',
+                    indent=4
+                )
+                logging.info(f"\nSaved regression results for {key} during {period_label} in '{regression_json_filename}'.")
+            except Exception as e:
+                logging.error(f"Failed to save regression results for {key} during {period_label} to '{regression_json_filename}': {e}")
+
+            # Add regression results to the master list
+            master_regression_results.extend(regression_results)
+
+# ---------------------------
+# Save Master Regression Results and Portfolio Characteristics
+# ---------------------------
+
+# Convert master regression results to DataFrame
+master_regression_df = pd.DataFrame(master_regression_results)
+
+if not master_regression_df.empty:
+
+    master_regression_json = 'master_regression_results.json'
+    master_regression_csv = 'master_regression_results.csv'
+
+    # Save to JSON
+    try:
+        master_regression_df.to_json(
+            os.path.join(regression_output_dir, master_regression_json),
+            orient='records',
+            date_format='iso',
+            indent=4
+        )
+        logging.info(f"\nSaved master regression results in '{master_regression_json}'.")
+    except Exception as e:
+        logging.error(f"Failed to save master regression results to '{master_regression_json}': {e}")
+
+    # Save to CSV
+    try:
+        master_regression_df.to_csv(
+            os.path.join(regression_output_dir, master_regression_csv),
+            index=False
+        )
+        logging.info(f"Saved master regression results in '{master_regression_csv}'.")
+    except Exception as e:
+        logging.error(f"Failed to save master regression results to '{master_regression_csv}': {e}")
+else:
+    logging.warning("Master regression results DataFrame is empty. No results to save.")
+
+# -------------------------------
+# Save Master Portfolio Characteristics
+# -------------------------------
+master_portfolio_characteristics_df = pd.concat(master_portfolio_characteristics, ignore_index=True)
+
+if not master_portfolio_characteristics_df.empty:
+    # Filenames for master portfolio characteristics
+    master_characteristics_json = 'master_portfolio_characteristics.json'
+    master_characteristics_csv = 'master_portfolio_characteristics.csv'
+
+    # Save to JSON
+    try:
+        master_portfolio_characteristics_df.to_json(
+            os.path.join(results_output_dir, master_characteristics_json),
+            orient='records',
+            date_format='iso',
+            indent=4
+        )
+        logging.info(f"Saved master portfolio characteristics in '{master_characteristics_json}'.")
+    except Exception as e:
+        logging.error(f"Failed to save master portfolio characteristics to '{master_characteristics_json}': {e}")
+
+    # Save to CSV
+    try:
+        master_portfolio_characteristics_df.to_csv(
+            os.path.join(results_output_dir, master_characteristics_csv),
+            index=False
+        )
+        logging.info(f"Saved master portfolio characteristics in '{master_characteristics_csv}'.")
+    except Exception as e:
+        logging.error(f"Failed to save master portfolio characteristics to '{master_characteristics_csv}': {e}")
+else:
+    logging.warning("Master portfolio characteristics DataFrame is empty. No results to save.")
+
+# ---------------------------
+# Completion Message
+# ---------------------------
+logging.info("\nRegression-Based T-Statistics Calculation Completed Successfully.")
