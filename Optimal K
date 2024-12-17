@@ -1,0 +1,897 @@
+#
+#
+# Purpose:
+# This script is designed to determine the optimal number of topics (K) for Latent Dirichlet Allocation (LDA) 
+# topic modeling on Swedish text data. It performs the following steps:
+#
+# 1. LDA Model Training and Evaluation: Trains multiple LDA models with varying numbers of topics (K) and evaluates 
+#   each model using a train-test split. It calculates several evaluation metrics, including log-likelihood, perplexity, 
+#   and various coherence scores (c_v, u_mass, c_npmi, c_uci) for both training and testing datasets.
+#
+# 2. Optimal K Identification: Analyzes the evaluation metrics to identify the optimal number of topics (K) that 
+#   yields the highest coherence score on the test set, ensuring the topics are both meaningful and distinct.
+#
+# 3. Results Logging and Visualization: Logs all processes and results for transparency and reproducibility. 
+#   Additionally, it saves the evaluation metrics to a CSV file and generates plots to visualize the performance 
+#   of different models across various values of K.
+
+"""
+
+
+# ---------------------------
+# Importing tools
+# ---------------------------
+
+
+import logging
+import pandas as pd
+import os
+import json
+import re
+from gensim import corpora
+from gensim.models import LdaModel, CoherenceModel
+import spacy
+import numpy as np
+import random
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm import tqdm
+import time
+# Removed chardet import
+
+# ---------------------------
+# Configure Logging
+# ---------------------------
+logging.basicConfig(
+    format='%(asctime)s : %(levelname)s : %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("preprocessing.log", mode='a', encoding='latin1', errors='replace')
+    ]
+)
+
+# ---------------------------
+# 2. Define Custom Stopword List
+# ---------------------------
+
+def get_custom_stopwords():
+    """
+    Returns a list of custom stopwords to be removed from the corpus.
+    """
+    custom_stopwords = [
+        "aderton", "adertonde", "adjö", "aldrig", "all", "alla", "allas", "allt",
+        "alltid", "alltså", "andra", "andras", "annan", "annat", "arton",
+        "artonde", "att", "av", "bakom", "bara", "behöva", "behövas", "behövde",
+        "behövt", "beslut", "beslutat", "beslutit", "bland", "blev", "bli",
+        "blir", "blivit", "borde", "bort", "borta", "bra", "bäst", "bättre",
+        "båda", "bådas", "både", "dag", "dagar", "dagarna", "dagen", "de",
+        "del", "delen", "dem", "den", "denna", "deras", "dess", "dessa", "det",
+        "detta", "dig", "din", "dina", "dit", "ditt", "dock", "dom", "du",
+        "där", "därför", "då", "efter", "eftersom", "ej", "elfte", "eller",
+        "elva", "en", "enkel", "enkelt", "enklare", "enklast", "enkla", "enligt", "er", "era", "ert",
+        "ett", "ettusen", "fall", "fanns", "fast", "fem", "femte", "femtio",
+        "femtionde", "femton", "femtonde", "fick", "fin", "finnas", "finns",
+        "fjorton", "fjortonde", "fjärde", "fler", "flera", "flesta", "fram",
+        "framför", "från", "fyra", "fyrtio", "fyrtionde", "få", "får", "fått",
+        "följande", "för", "före", "förlåt", "förra", "första", "ge", "genast",
+        "genom", "ger", "gick", "gjorde", "gjort", "god", "goda", "godare",
+        "godast", "gott", "gälla", "gäller", "gällt", "gärna", "gå", "gång",
+        "går", "gått", "gör", "göra", "ha", "hade", "haft", "han", "hans", "har",
+        "hela", "heller", "hellre", "helst", "helt", "henne", "hennes", "heter",
+        "hit", "hjälp", "hon", "honom", "hundra", "hundraen", "hundraett", "hur",
+        "här", "hög", "höger", "högre", "högst", "i", "ibland", "icke", "idag",
+        "igen", "igår", "imorgon", "in", "inför", "inga", "ingen", "ingenting",
+        "inget", "innan", "inne", "inom", "inte", "inuti", "ja", "jag", "ju",
+        "jämfört", "kan", "kanske", "knappast", "kolla", "kom", "komma", "kommer",
+        "kommit", "kr", "kunde", "kunna", "kunnat", "kvar", "kör", "legat",
+        "ligga", "ligger", "lika", "likställd", "likställda", "lilla", "lite",
+        "liten", "litet", "lägga", "länge", "längre", "längst", "lätt", "lättare",
+        "lättast", "långsam", "långsammare", "långsammast", "långsamt", "långt",
+        "man", "med", "mellan", "men", "menar", "mer", "mera", "mest", "mig",
+        "min", "mina", "mindre", "minst", "mitt", "mittemot", "mot", "mycket",
+        "många", "måste", "möjlig", "möjligen", "möjligt", "möjligtvis", "ned",
+        "nederst", "nedersta", "nedre", "nej", "ner", "ni", "nio", "nionde",
+        "nittio", "nittionde", "nitton", "nittonde", "nog", "noll", "nr", "nu",
+        "nummer", "namn" "nya", "när", "nästa", "någon", "någonting", "något", "några",
+        "nån", "nåt", "nödvändig", "nödvändiga", "nödvändigt", "nödvändigtvis",
+        "och", "också", "ofta", "oftast", "olika", "olikt", "om", "oss", "procent",
+        "på", "rakt", "redan", "rätt", "sade", "sagt", "samma", "samt", "sedan",
+        "sen", "senare", "senast", "sent", "ser", "se", "sex", "sextio", "sextionde",
+        "sexton", "sextonde", "sig", "sin", "sina", "sist", "sista", "siste",
+        "sitt", "sitta", "sju", "sjunde", "sjuttio", "sjuttionde", "sjutton",
+        "sjuttonde", "själv", "sjätte", "ska", "skall", "skriver", "skulle",
+        "slutligen", "små", "smått", "snart", "som", "stor", "stora", "stort",
+        "står", "stå", "större", "störst", "säga", "säger", "sämre", "sämst", "sätt",
+        "så", "sådan", "sådana", "sådant", "ta", "tack", "tar", "tidig",
+        "tidigare", "tidigast", "tidigt", "till", "tills", "tillsammans", "tio",
+        "tionde", "tjugo", "tjugoen", "tjugoett", "tjugonde", "tjugotre",
+        "tjugotvå", "tjungo", "tog", "tolfte", "tolv", "tre", "tredje", "trettio",
+        "trettionde", "tretton", "trettonde", "tro", "tror", "två", "tvåhundra",
+        "under", "upp", "ur", "ursäkt", "ut", "utan", "utanför", "ute", "utom",
+        "vad", "var", "vara", "varför", "varifrån", "varit", "varje", "varken",
+        "vars", "varsågod", "vart", "vem", "vems", "verkligen", "vet", "vi",
+        "vid", "vidare", "viktig", "viktigare", "viktigast", "viktigt", "vilka",
+        "vilkas", "vilken", "vilket", "vill", "visst", "väl", "vänster", "vänstra",
+        "värre", "vår", "våra", "vårt", "än", "ändå", "år", "ännu", "är", "även", "året",
+        "åt", "åtminstone", "åtta", "åttio", "åttionde", "åttonde", "över",
+        "övermorgon", "överst", "övre"
+    ]
+    logging.info(f"Custom stopword list loaded with {len(custom_stopwords)} words.")
+    return custom_stopwords
+
+# ---------------------------
+# 3. Fetch Common Names
+# ---------------------------
+
+def fetch_common_names():
+    """
+    Fetches common men's, women's, and last names from predefined URLs.
+
+    Returns:
+    - list: Combined list of common names.
+    """
+    logging.info("Fetching common names from online sources...")
+
+    common_names = []
+
+    # Fetch top 5 men's names
+    men_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/fornamn-man.csv"
+    try:
+        men_names_df = pd.read_csv(men_names_url, encoding='latin1')
+        men_names_df = men_names_df.sort_values(by='persons', ascending=False)
+        common_men_names = men_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_men_names])
+        logging.info(f"Fetched top 5 common men's names: {common_men_names}")
+    except Exception as e:
+        logging.error(f"Error fetching men's names from {men_names_url}: {e}")
+
+    # Fetch top 5 women's names
+    women_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/fornamn-kvinnor.csv"
+    try:
+        women_names_df = pd.read_csv(women_names_url, encoding='latin1')
+        women_names_df = women_names_df.sort_values(by='persons', ascending=False)
+        common_women_names = women_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_women_names])
+        logging.info(f"Fetched top 5 common women's names: {common_women_names}")
+    except Exception as e:
+        logging.error(f"Error fetching women's names from {women_names_url}: {e}")
+
+    # Fetch top 5 last names
+    last_names_url = "https://raw.githubusercontent.com/peterdalle/svensktext/master/namn/efternamn.csv"
+    try:
+        last_names_df = pd.read_csv(last_names_url, encoding='latin1')
+        last_names_df = last_names_df.sort_values(by='persons', ascending=False)
+        common_last_names = last_names_df['name'].head(5).astype(str).tolist()
+        common_names.extend([name.lower() for name in common_last_names])
+        logging.info(f"Fetched top 5 common last names: {common_last_names}")
+    except Exception as e:
+        logging.error(f"Error fetching last names from {last_names_url}: {e}")
+
+    logging.info(f"Total common names fetched: {len(common_names)}")
+    return common_names
+
+# ---------------------------
+# 4. Load and Initialize SpaCy
+# ---------------------------
+
+def load_spacy_model():
+    """
+    Load the SpaCy Swedish model, downloading it if not present.
+
+    Returns:
+    - spacy.language.Language: The loaded SpaCy model.
+    """
+    model_name = 'sv_core_news_sm'
+    try:
+        # Only disable 'ner' to keep the parser active
+        nlp = spacy.load(model_name, disable=['ner'])
+        logging.info(f"SpaCy model '{model_name}' loaded successfully with 'ner' disabled.")
+        return nlp
+    except OSError:
+        logging.warning(f"SpaCy model '{model_name}' not found. Attempting to download...")
+        try:
+            spacy.cli.download(model_name)
+            nlp = spacy.load(model_name, disable=['ner'])
+            logging.info(f"SpaCy model '{model_name}' downloaded and loaded successfully.")
+            return nlp
+        except Exception as e:
+            logging.error(f"Failed to download and load SpaCy model '{model_name}': {e}")
+            raise
+    except Exception as e:
+        logging.error(f"Error loading SpaCy model: {e}")
+        raise
+
+# ---------------------------
+# 5. Load Data
+# ---------------------------
+
+def load_data(filepath):
+    logging.info(f"Loading data from {filepath}...")
+    encodings_to_try = ['utf-8', 'latin1', 'cp1252']  # List of encodings to try
+    for encoding in encodings_to_try:
+        try:
+            with open(filepath, 'r', encoding=encoding) as file:
+                data = json.load(file)
+            df = pd.DataFrame(data)
+            logging.info(f"Data loaded successfully with encoding '{encoding}' and {len(df)} records.")
+            return df
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logging.warning(f"Failed to read file with encoding '{encoding}': {e}")
+            continue  # Try the next encoding
+        except FileNotFoundError:
+            logging.error(f"The file {filepath} does not exist. Please check the file path and name.")
+            raise
+        except Exception as e:
+            logging.error(f"Error loading data from {filepath} with encoding '{encoding}': {e}")
+            raise
+    logging.error("Failed to load data with all tried encodings.")
+    raise ValueError("Cannot read the file with the specified encodings.")
+
+# ---------------------------
+# 6. Preprocessing
+# ---------------------------
+
+def preprocess_texts(texts):
+    logging.info("Starting text preprocessing...")
+    # Remove emails
+    texts = [re.sub(r'\S*@\S*\s?', '', text) for text in texts]
+    # Remove URLs
+    texts = [re.sub(r'http\S+|www\S+', '', text) for text in texts]
+    # Remove new line characters
+    texts = [re.sub(r'\s+', ' ', text) for text in texts]
+    # Remove single quotes
+    texts = [re.sub(r"\'", "", text) for text in texts]
+    # Remove non-alphabetic characters (excluding Swedish characters)
+    texts = [re.sub(r'[^a-zA-ZåäöÅÄÖ\s]', '', text) for text in texts]
+    # Convert to lowercase
+    texts = [text.strip().lower() for text in texts]
+    logging.info("Text preprocessing completed.")
+    return texts
+
+def lemmatization(texts, nlp, allowed_postags=['NOUN', 'ADJ', 'VERB', 'ADV']):
+    logging.info("Starting lemmatization...")
+    texts_out = []
+    for doc in nlp.pipe(texts, batch_size=50, n_process=1):
+        lemmatized = []
+        for token in doc:
+            if token.pos_ in allowed_postags:
+                lemma = token.lemma_.lower()
+                lemmatized.append(lemma)
+        texts_out.append(lemmatized)
+    logging.info("Lemmatization completed.")
+    return texts_out
+
+def remove_stopwords(lemmatized_texts, stopwords_set):
+    logging.info("Removing stopwords and common names...")
+    processed_texts = [
+        [token for token in doc if token not in stopwords_set]
+        for doc in lemmatized_texts
+    ]
+    logging.info("Stopwords and common names removal completed.")
+    return processed_texts
+
+def check_stopword_removal(processed_texts, stopwords_set, sample_size=5):
+
+    """
+    Check that stopwords have been removed from the processed texts.
+
+    - processed_texts (list of list of str): Preprocessed and tokenized texts.
+    - stopwords_set (set of str): Set of stopwords that should have been removed.
+    - sample_size (int): Number of documents to sample for checking.
+
+    Logs whether stopwords are present in sampled documents.
+
+    """
+    logging.info("Checking if stopwords have been removed from the processed texts...")
+    if len(processed_texts) == 0:
+        logging.warning("No documents to check for stopwords.")
+        return
+    actual_sample_size = min(sample_size, len(processed_texts))
+    sample_indices = random.sample(range(len(processed_texts)), actual_sample_size)
+    for idx in sample_indices:
+        doc = processed_texts[idx]
+        remaining_stopwords = set(doc).intersection(stopwords_set)
+        if remaining_stopwords:
+            logging.warning(f"Stopwords found in document {idx}: {remaining_stopwords}")
+        else:
+            logging.info(f"No stopwords found in document {idx}.")
+
+def count_remaining_stopwords(processed_texts, stopwords_set):
+    total_remaining = sum(len(set(doc).intersection(stopwords_set)) for doc in processed_texts)
+    logging.info(f"Total remaining stopwords across all documents: {total_remaining}")
+
+def analyze_word_frequencies(processed_texts, top_n=20, bottom_n=20):
+    """
+    Analyze and print the most and least frequent words in the corpus.
+
+    - processed_texts (list of list of str): Tokenized and preprocessed texts.
+    - top_n (int): Number of top frequent words to display.
+    - bottom_n (int): Number of least frequent words to display.
+    - dict: A dictionary with word frequencies.
+
+    """
+    word_freq = defaultdict(int)
+    for doc in processed_texts:
+        for word in doc:
+            word_freq[word] += 1
+
+    # Sort words by frequency in downward order
+    sorted_word_freq = sorted(word_freq.items(), key=lambda item: item[1], reverse=True)
+
+    print(f"\n--- Top {top_n} Most Frequent Words ---\n")
+    for word, freq in sorted_word_freq[:top_n]:
+        print(f"{word}: {freq}")
+
+    print(f"\n--- Bottom {bottom_n} Least Frequent Words ---\n")
+    for word, freq in sorted_word_freq[-bottom_n:]:
+        print(f"{word}: {freq}")
+
+    # Optionally, return the frequency dictionary for further use
+    return word_freq
+
+def preprocess_pipeline(texts, stopwords, common_names, nlp):
+    """
+    Complete preprocessing pipeline: cleaning, lemmatization, and stopword removal.
+
+    - texts: Raw text documents.
+    - stopwords: List of stopwords to remove.
+    - common_names: List of common names to remove.
+    - nlp: SpaCy language model.
+
+    """
+    # Step 1: Clean texts
+    cleaned_texts = preprocess_texts(texts)
+    # Check Swedish characters after cleaning
+    check_swedish_characters(cleaned_texts, "After preprocessing texts")
+
+    # Step 2: Lemmatize texts
+    lemmatized_texts = lemmatization(cleaned_texts, nlp)
+    # Check Swedish characters after lemmatization
+    check_swedish_characters(lemmatized_texts, "After lemmatization")
+
+    # Step 3: Combine stopwords and common names
+    combined_stopwords = set([word.lower() for word in stopwords] + [name.lower() for name in common_names])
+
+    # Step 4: Remove stopwords and common names
+    processed_texts = remove_stopwords(lemmatized_texts, combined_stopwords)
+    # Check Swedish characters after stopword removal
+    check_swedish_characters(processed_texts, "After stopword removal")
+
+    # Step 5: Check stopword removal
+    check_stopword_removal(processed_texts, combined_stopwords, sample_size=5)
+
+    # Step 6: Count remaining stopwords
+    count_remaining_stopwords(processed_texts, combined_stopwords)
+
+    return processed_texts
+
+def check_swedish_characters(texts, step_description):
+    swedish_chars = ['å', 'ä', 'ö']
+    for idx, text in enumerate(texts[:5]):  # Check the first 5 texts
+        if isinstance(text, list):
+            joined_text = ' '.join(text)
+        else:
+            joined_text = text
+        chars_present = {char: char in joined_text for char in swedish_chars}
+        logging.info(f"{step_description} - Document {idx} Swedish characters presence: {chars_present}")
+
+# ---------------------------
+# 7. Building the Dictionary and Corpus
+# ---------------------------
+
+def build_dictionary_and_corpus(processed_texts, no_below=20, no_above=0.95):
+    logging.info("Building dictionary and corpus...")
+    # Create Dictionary
+    dictionary = corpora.Dictionary(processed_texts)
+    logging.info(f"Initial dictionary size: {len(dictionary)}")
+
+    # Filter out extremes to limit the number of features
+    dictionary.filter_extremes(no_below=no_below, no_above=no_above)
+    logging.info(f"Dictionary size after filtering: {len(dictionary)}")
+
+    # Filter processed_texts to only include words in the filtered dictionary
+    filtered_texts = [[word for word in text if word in dictionary.token2id] for text in processed_texts]
+    logging.info("Processed texts have been filtered to match the dictionary vocabulary.")
+
+    # Create Corpus: Term Document Frequency
+    corpus = [dictionary.doc2bow(text) for text in filtered_texts]
+    logging.info(f"Corpus size: {len(corpus)}")
+
+    return dictionary, corpus, filtered_texts
+
+# ---------------------------
+# 8. LDA Model Training and Evaluation
+# ---------------------------
+
+def train_lda_models(dictionary, corpus, texts, k_values, iterations=10, random_state=42, passes=15):
+    """
+    Train multiple LDA models with varying numbers of topics and evaluate them using a train-test split.
+    
+    - dictionary (gensim.corpora.Dictionary): The dictionary mapping.
+    - corpus: The corpus in bag-of-words format.
+    - texts: The preprocessed and tokenized texts.
+    - k_values: List of k values (number of topics) to test.
+    - iterations: Number of times to repeat the model training per k.
+    - random_state: Seed for reproducibility.
+    - passes: Number of passes through the corpus during training.
+    - dict: Dictionary containing lists of evaluation metrics.
+
+    """
+    import warnings
+    from sklearn.model_selection import train_test_split
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    
+    logging.info("Starting LDA model training and evaluation with train-test split...")
+    metrics = {
+        'k': [],
+        'log_likelihood_train': [],
+        'perplexity_train': [],
+        'log_likelihood_test': [],
+        'perplexity_test': [],
+        'coherence_c_v_train': [],
+        'coherence_u_mass_train': [],
+        'coherence_c_npmi_train': [],
+        'coherence_c_uci_train': [],
+        'coherence_c_v_test': [],
+        'coherence_u_mass_test': [],
+        'coherence_c_npmi_test': [],
+        'coherence_c_uci_test': []
+    }
+    
+    # Split the corpus and texts into training and testing sets
+    train_corpus, test_corpus, train_texts, test_texts = train_test_split(
+        corpus, texts, train_size=0.8, random_state=random_state
+    )
+    logging.info(f"Corpus split into {len(train_corpus)} training and {len(test_corpus)} testing documents.")
+
+    total_iterations = len(k_values) * iterations
+    progress_bar = tqdm(total=total_iterations, desc="Training LDA Models", unit="model")
+
+    for k in k_values:
+        log_likelihoods_train = []
+        perplexities_train = []
+        log_likelihoods_test = []
+        perplexities_test = []
+        coherence_scores_c_v_train = []
+        coherence_scores_u_mass_train = []
+        coherence_scores_c_npmi_train = []
+        coherence_scores_c_uci_train = []
+        coherence_scores_c_v_test = []
+        coherence_scores_u_mass_test = []
+        coherence_scores_c_npmi_test = []
+        coherence_scores_c_uci_test = []
+
+        for iter_num in range(iterations):
+            start_time = time.time()
+            try:
+                lda_model = LdaModel(
+                    corpus=train_corpus,
+                    id2word=dictionary,
+                    num_topics=k,
+                    random_state=random_state + iter_num,  
+                    passes=passes,
+                    alpha=0.01,  
+                    eta=0.001,   
+                    iterations=100,  # Increase iterations for better convergence
+                    per_word_topics=True,
+                    update_every=0  
+                )
+
+                # Compute Log-Likelihood on Train
+                log_likelihood_train = lda_model.log_perplexity(train_corpus)
+                perplexity_train = np.exp(-log_likelihood_train)
+
+                # Compute Log-Likelihood on Test
+                log_likelihood_test = lda_model.log_perplexity(test_corpus)
+                perplexity_test = np.exp(-log_likelihood_test)
+
+                # Compute Coherence Scores on Train Set
+                coherence_model_c_v_train = CoherenceModel(
+                    model=lda_model,
+                    texts=train_texts,
+                    dictionary=dictionary,
+                    coherence='c_v'
+                )
+                coherence_c_v_train = coherence_model_c_v_train.get_coherence()
+
+                coherence_model_u_mass_train = CoherenceModel(
+                    model=lda_model,
+                    corpus=train_corpus,
+                    dictionary=dictionary,
+                    coherence='u_mass'
+                )
+                coherence_u_mass_train = coherence_model_u_mass_train.get_coherence()
+
+                coherence_model_c_npmi_train = CoherenceModel(
+                    model=lda_model,
+                    texts=train_texts,
+                    dictionary=dictionary,
+                    coherence='c_npmi'
+                )
+                coherence_c_npmi_train = coherence_model_c_npmi_train.get_coherence()
+
+                coherence_model_c_uci_train = CoherenceModel(
+                    model=lda_model,
+                    texts=train_texts,
+                    dictionary=dictionary,
+                    coherence='c_uci'
+                )
+                coherence_c_uci_train = coherence_model_c_uci_train.get_coherence()
+
+                # Compute Coherence Scores on Test Set
+                coherence_model_c_v_test = CoherenceModel(
+                    model=lda_model,
+                    texts=test_texts,
+                    dictionary=dictionary,
+                    coherence='c_v'
+                )
+                coherence_c_v_test = coherence_model_c_v_test.get_coherence()
+
+                coherence_model_u_mass_test = CoherenceModel(
+                    model=lda_model,
+                    corpus=test_corpus,
+                    dictionary=dictionary,
+                    coherence='u_mass'
+                )
+                coherence_u_mass_test = coherence_model_u_mass_test.get_coherence()
+
+                coherence_model_c_npmi_test = CoherenceModel(
+                    model=lda_model,
+                    texts=test_texts,
+                    dictionary=dictionary,
+                    coherence='c_npmi'
+                )
+                coherence_c_npmi_test = coherence_model_c_npmi_test.get_coherence()
+
+                coherence_model_c_uci_test = CoherenceModel(
+                    model=lda_model,
+                    texts=test_texts,
+                    dictionary=dictionary,
+                    coherence='c_uci'
+                )
+                coherence_c_uci_test = coherence_model_c_uci_test.get_coherence()
+
+                # Append metrics
+                log_likelihoods_train.append(log_likelihood_train)
+                perplexities_train.append(perplexity_train)
+                log_likelihoods_test.append(log_likelihood_test)
+                perplexities_test.append(perplexity_test)
+                coherence_scores_c_v_train.append(coherence_c_v_train)
+                coherence_scores_u_mass_train.append(coherence_u_mass_train)
+                coherence_scores_c_npmi_train.append(coherence_c_npmi_train)
+                coherence_scores_c_uci_train.append(coherence_c_uci_train)
+                coherence_scores_c_v_test.append(coherence_c_v_test)
+                coherence_scores_u_mass_test.append(coherence_u_mass_test)
+                coherence_scores_c_npmi_test.append(coherence_c_npmi_test)
+                coherence_scores_c_uci_test.append(coherence_c_uci_test)
+
+                # Log individual iteration results
+                logging.info(
+                    f"LDA Model (k={k}, iter={iter_num+1}) - "
+                    f"Train Log-Likelihood: {log_likelihood_train:.4f}, Train Perplexity: {perplexity_train:.4f}, "
+                    f"Test Log-Likelihood: {log_likelihood_test:.4f}, Test Perplexity: {perplexity_test:.4f}, "
+                    f"Train Coherence c_v: {coherence_c_v_train:.4f}, Train Coherence u_mass: {coherence_u_mass_train:.4f}, "
+                    f"Train Coherence c_npmi: {coherence_c_npmi_train:.4f}, Train Coherence c_uci: {coherence_c_uci_train:.4f}, "
+                    f"Test Coherence c_v: {coherence_c_v_test:.4f}, Test Coherence u_mass: {coherence_u_mass_test:.4f}, "
+                    f"Test Coherence c_npmi: {coherence_c_npmi_test:.4f}, Test Coherence c_uci: {coherence_c_uci_test:.4f}"
+                )
+
+            except Exception as e:
+                logging.error(
+                    f"Failed to train LDA model with k={k} on iteration {iter_num+1}: {e}"
+                )
+                continue
+
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            logging.info(
+                f"Iteration {iter_num+1} for k={k} completed in {elapsed_time:.2f} seconds."
+            )
+
+            progress_bar.update(1)
+
+        # Calculate average metrics for current k
+        avg_log_likelihood_train = np.mean(log_likelihoods_train) if log_likelihoods_train else None
+        avg_perplexity_train = np.mean(perplexities_train) if perplexities_train else None
+        avg_log_likelihood_test = np.mean(log_likelihoods_test) if log_likelihoods_test else None
+        avg_perplexity_test = np.mean(perplexities_test) if perplexities_test else None
+        avg_coherence_c_v_train = np.mean(coherence_scores_c_v_train) if coherence_scores_c_v_train else None
+        avg_coherence_u_mass_train = np.mean(coherence_scores_u_mass_train) if coherence_scores_u_mass_train else None
+        avg_coherence_c_npmi_train = np.mean(coherence_scores_c_npmi_train) if coherence_scores_c_npmi_train else None
+        avg_coherence_c_uci_train = np.mean(coherence_scores_c_uci_train) if coherence_scores_c_uci_train else None
+        avg_coherence_c_v_test = np.mean(coherence_scores_c_v_test) if coherence_scores_c_v_test else None
+        avg_coherence_u_mass_test = np.mean(coherence_scores_u_mass_test) if coherence_scores_u_mass_test else None
+        avg_coherence_c_npmi_test = np.mean(coherence_scores_c_npmi_test) if coherence_scores_c_npmi_test else None
+        avg_coherence_c_uci_test = np.mean(coherence_scores_c_uci_test) if coherence_scores_c_uci_test else None
+
+        # Store averaged metrics
+        metrics['k'].append(k)
+        metrics['log_likelihood_train'].append(avg_log_likelihood_train)
+        metrics['perplexity_train'].append(avg_perplexity_train)
+        metrics['log_likelihood_test'].append(avg_log_likelihood_test)
+        metrics['perplexity_test'].append(avg_perplexity_test)
+        metrics['coherence_c_v_train'].append(avg_coherence_c_v_train)
+        metrics['coherence_u_mass_train'].append(avg_coherence_u_mass_train)
+        metrics['coherence_c_npmi_train'].append(avg_coherence_c_npmi_train)
+        metrics['coherence_c_uci_train'].append(avg_coherence_c_uci_train)
+        metrics['coherence_c_v_test'].append(avg_coherence_c_v_test)
+        metrics['coherence_u_mass_test'].append(avg_coherence_u_mass_test)
+        metrics['coherence_c_npmi_test'].append(avg_coherence_c_npmi_test)
+        metrics['coherence_c_uci_test'].append(avg_coherence_c_uci_test)
+
+        logging.info(
+            f"LDA Model (k={k}) - "
+            f"Avg Train Log-Likelihood: {avg_log_likelihood_train:.4f}, "
+            f"Avg Train Perplexity: {avg_perplexity_train:.4f}, "
+            f"Avg Test Log-Likelihood: {avg_log_likelihood_test:.4f}, "
+            f"Avg Test Perplexity: {avg_perplexity_test:.4f}, "
+            f"Avg Train Coherence c_v: {avg_coherence_c_v_train:.4f}, "
+            f"Avg Train Coherence u_mass: {avg_coherence_u_mass_train:.4f}, "
+            f"Avg Train Coherence c_npmi: {avg_coherence_c_npmi_train:.4f}, "
+            f"Avg Train Coherence c_uci: {avg_coherence_c_uci_train:.4f}, "
+            f"Avg Test Coherence c_v: {avg_coherence_c_v_test:.4f}, "
+            f"Avg Test Coherence u_mass: {avg_coherence_u_mass_test:.4f}, "
+            f"Avg Test Coherence c_npmi: {avg_coherence_c_npmi_test:.4f}, "
+            f"Avg Test Coherence c_uci: {avg_coherence_c_uci_test:.4f}"
+        )
+
+    progress_bar.close()
+    logging.info("LDA model training and evaluation completed with train-test split.")
+    return metrics
+
+
+
+# ---------------------------
+# 9. Main Execution Block
+# ---------------------------
+
+def main():
+    # ---------------------------
+    # 9.1. Define Filepath
+    # ---------------------------
+    filepath = '/Users/Desktop/articles'  # <----- Need to be replaced with correct file path for articles
+
+    # ---------------------------
+    # 9.2. Load Data
+    # ---------------------------
+    try:
+        df = load_data(filepath)
+    except Exception as e:
+        logging.error("Exiting due to data loading failure.")
+        return
+
+    # ---------------------------
+    # 9.3. Fetch Custom Stopwords and Common Names
+    # ---------------------------
+    stopwords = get_custom_stopwords()
+    common_names = fetch_common_names()
+
+    # ---------------------------
+    # 9.4. Load SpaCy Model
+    # ---------------------------
+    try:
+        nlp = load_spacy_model()
+    except Exception as e:
+        logging.error("Exiting due to SpaCy model loading failure.")
+        return
+
+    # ---------------------------
+    # 9.5. Check for 'text' Column
+    # ---------------------------
+    if 'text' not in df.columns:
+        logging.error("The DataFrame does not contain a 'text' column.")
+        return
+
+    # ---------------------------
+    # 9.6. Sample Documents for Evaluation
+    # ---------------------------
+    sample_size = 10000  # Define your sample size here
+    logging.info(f"Sampling {sample_size} documents for LDA evaluation...")
+    if len(df) > sample_size:
+        sampled_df = df.sample(n=sample_size, random_state=42)
+    else:
+        sampled_df = df
+        logging.warning(f"The dataset contains fewer than {sample_size} documents. Using all available documents.")
+
+    texts = sampled_df['text'].astype(str).tolist()
+
+    # ---------------------------
+    # 9.7. Preprocess Sampled Texts
+    # ---------------------------
+    logging.info("Preprocessing sampled texts...")
+    processed_texts = preprocess_pipeline(texts, stopwords, common_names, nlp)
+
+    # ---------------------------
+    # 9.8. Analyze Word Frequencies (After Stopword Removal)
+    # ---------------------------
+    logging.info("Analyzing word frequencies in processed texts...")
+    word_freq = analyze_word_frequencies(processed_texts, top_n=20, bottom_n=20)
+
+    # ---------------------------
+    # 9.9. Build Dictionary and Corpus
+    # ---------------------------
+    logging.info("Building dictionary and corpus for processed texts...")
+    dictionary, corpus, filtered_texts = build_dictionary_and_corpus(processed_texts)
+
+    # ---------------------------
+    # 9.10. Define k Values
+    # ---------------------------
+    k_values = list(range(5, 101, 10))  # Adjust as needed
+    logging.info(f"Selected k-values for evaluation: {k_values}")
+
+    # ---------------------------
+    # 9.11. Train LDA Models and Evaluate
+    # ---------------------------
+    metrics = train_lda_models(
+        dictionary=dictionary,
+        corpus=corpus,
+        texts=filtered_texts,  # Use filtered_texts here
+        k_values=k_values,
+        iterations=10,  # Number of times to repeat training per k
+        random_state=42,
+        passes=15  # Increased passes for better convergence
+    )
+
+    # ---------------------------
+    # 9.12. Display and Save Metrics Table
+    # ---------------------------
+
+    def plot_metrics(metrics):
+        """
+        Plot evaluation metrics against the number of topics and save the figures.
+        """
+        sns.set(style="whitegrid")
+        plt.figure(figsize=(20, 50))
+
+        # Plot Perplexity (Train and Test)
+        plt.subplot(10, 1, 1)
+        sns.lineplot(x=metrics['k'], y=metrics['perplexity_train'], marker='o', color='blue', label='Train Perplexity')
+        sns.lineplot(x=metrics['k'], y=metrics['perplexity_test'], marker='o', color='red', label='Test Perplexity')
+        plt.title('LDA Model Perplexity')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Perplexity')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Log-Likelihood (Train and Test)
+        plt.subplot(10, 1, 2)
+        sns.lineplot(x=metrics['k'], y=metrics['log_likelihood_train'], marker='o', color='blue', label='Train Log-Likelihood')
+        sns.lineplot(x=metrics['k'], y=metrics['log_likelihood_test'], marker='o', color='red', label='Test Log-Likelihood')
+        plt.title('LDA Model Log-Likelihood (ELBO)')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Log-Likelihood (ELBO)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Coherence Score c_v on Train Set
+        plt.subplot(10, 1, 3)
+        sns.lineplot(x=metrics['k'], y=metrics['coherence_c_v_train'], marker='o', color='green', label='Train Coherence c_v')
+        plt.title('LDA Model Coherence Score (c_v) on Train Set')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Coherence Score (c_v)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Coherence Score c_v on Test Set
+        plt.subplot(10, 1, 4)
+        sns.lineplot(x=metrics['k'], y=metrics['coherence_c_v_test'], marker='o', color='green', label='Test Coherence c_v')
+        plt.title('LDA Model Coherence Score (c_v) on Test Set')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Coherence Score (c_v)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Coherence Score u_mass on Train Set
+        plt.subplot(10, 1, 5)
+        sns.lineplot(x=metrics['k'], y=metrics['coherence_u_mass_train'], marker='o', color='orange', label='Train Coherence u_mass')
+        plt.title('LDA Model Coherence Score (u_mass) on Train Set')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Coherence Score (u_mass)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Coherence Score u_mass on Test Set
+        plt.subplot(10, 1, 6)
+        sns.lineplot(x=metrics['k'], y=metrics['coherence_u_mass_test'], marker='o', color='orange', label='Test Coherence u_mass')
+        plt.title('LDA Model Coherence Score (u_mass) on Test Set')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Coherence Score (u_mass)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Coherence Score c_npmi on Train Set
+        plt.subplot(10, 1, 7)
+        sns.lineplot(x=metrics['k'], y=metrics['coherence_c_npmi_train'], marker='o', color='purple', label='Train Coherence c_npmi')
+        plt.title('LDA Model Coherence Score (c_npmi) on Train Set')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Coherence Score (c_npmi)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Coherence Score c_npmi on Test Set
+        plt.subplot(10, 1, 8)
+        sns.lineplot(x=metrics['k'], y=metrics['coherence_c_npmi_test'], marker='o', color='purple', label='Test Coherence c_npmi')
+        plt.title('LDA Model Coherence Score (c_npmi) on Test Set')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Coherence Score (c_npmi)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Coherence Score c_uci on Train Set
+        plt.subplot(10, 1, 9)
+        sns.lineplot(x=metrics['k'], y=metrics['coherence_c_uci_train'], marker='o', color='brown', label='Train Coherence c_uci')
+        plt.title('LDA Model Coherence Score (c_uci) on Train Set')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Coherence Score (c_uci)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        # Plot Coherence Score c_uci on Test Set
+        plt.subplot(10, 1, 10)
+        sns.lineplot(x=metrics['k'], y=metrics['coherence_c_uci_test'], marker='o', color='brown', label='Test Coherence c_uci')
+        plt.title('LDA Model Coherence Score (c_uci) on Test Set')
+        plt.xlabel('Number of Topics (k)')
+        plt.ylabel('Coherence Score (c_uci)')
+        plt.legend()
+        plt.xticks(metrics['k'])
+
+        plt.tight_layout()
+
+        # Save the figure to a file instead of displaying it
+        plt.savefig('lda_evaluation_metrics.png')
+        logging.info("Evaluation metrics plotted and saved to 'lda_evaluation_metrics.png'.")
+        plt.close()
+
+    # Plot and save metrics
+    logging.info("Plotting evaluation metrics...")
+    plot_metrics(metrics)
+
+    # ---------------------------
+    # 9.13. Convert Metrics to DataFrame and Save
+    # ---------------------------
+    metrics_df = pd.DataFrame(metrics)
+    metrics_df.to_csv('lda_evaluation_metrics.csv', index=False)
+    logging.info("LDA evaluation metrics saved to 'lda_evaluation_metrics.csv'.")
+
+    # ---------------------------
+    # 9.14. Display the Metrics Table in Console
+    # ---------------------------
+    if metrics_df.empty:
+        print("No metrics to display.")
+        return
+
+    print("\n--- Evaluation Metrics for Each k ---\n")
+    print(metrics_df.to_string(index=False))
+
+    # ---------------------------
+    # 9.15. Identify and Print Optimal k
+    # ---------------------------
+    if not metrics_df.empty:
+        # Identify the k with the highest coherence_c_v_test
+        optimal_k_row = metrics_df.loc[metrics_df['coherence_c_v_test'].idxmax()]
+        optimal_k = optimal_k_row['k']
+        optimal_coherence = optimal_k_row['coherence_c_v_test']
+
+        # Log the optimal k
+        logging.info(f"Optimal number of topics based on highest coherence_c_v_test: {optimal_k} with coherence score {optimal_coherence}")
+
+        # Print the optimal k
+        print(f"\nOptimal number of topics (k) based on highest coherence_c_v_test: {int(optimal_k)} with coherence score {optimal_coherence:.4f}")
+    else:
+        logging.error("No coherence scores available to determine the optimal k.")
+        print("No coherence scores available to determine the optimal k.")
+
+    # ---------------------------
+    # 9.16. Indicate Completion
+    # ---------------------------
+    logging.info("Script completed successfully.")
+
+
+# ---------------------------
+# Execute the Main Function
+# ---------------------------
+
+if __name__ == "__main__":
+    main()
