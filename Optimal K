@@ -1,5 +1,5 @@
 #
-#
+# 
 # Purpose:
 # This script is designed to determine the optimal number of topics (K) for Latent Dirichlet Allocation (LDA) 
 # topic modeling on Swedish text data. It performs the following steps:
